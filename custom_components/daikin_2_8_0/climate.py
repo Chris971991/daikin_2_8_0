@@ -199,11 +199,20 @@ class DaikinClimate(ClimateEntity):
                 {"op": 2, "to": "/dsiot/edge.adp_i"}
             ]
         }
-        response = await hass.async_add_executor_job(lambda: requests.post(self.url, json=payload))
-        response.raise_for_status()
-        data = response.json()
-        self._mac = format_mac(self.find_value_by_pn(data, "/dsiot/edge.adp_i", "adp_i", "mac"))
-        _LOGGER.info(f"Initialized Daikin AC with MAC: {self._mac}")
+        try:
+            response = await hass.async_add_executor_job(lambda: requests.post(self.url, json=payload))
+            response.raise_for_status()
+            data = response.json()
+            mac_value = self.find_value_by_pn(data, "/dsiot/edge.adp_i", "adp_i", "mac")
+            if mac_value is not None:
+                self._mac = format_mac(mac_value)
+                _LOGGER.info(f"Initialized Daikin AC with MAC: {self._mac}")
+            else:
+                self._mac = f"daikin_{self._ip_address.replace('.', '_')}"
+                _LOGGER.warning(f"Could not get MAC address, using fallback ID: {self._mac}")
+        except Exception as e:
+            self._mac = f"daikin_{self._ip_address.replace('.', '_')}"
+            _LOGGER.error(f"Error getting MAC address: {e}. Using fallback ID: {self._mac}")
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -319,25 +328,43 @@ class DaikinClimate(ClimateEntity):
 
     @staticmethod
     def find_value_by_pn(data:dict, fr: str, *keys):
-        data = [ x['pc'] for x in data['responses'] if x['fr'] == fr ]
+        try:
+            # Use get() to safely check for 'fr' key
+            data = [ x['pc'] for x in data['responses'] if x.get('fr') == fr ]
+            if not data:
+                return None  # Return None if no matching 'fr' found
 
-        while keys:
-            current_key = keys[0]
-            keys = keys[1:]
-            found = False
-            for pcs in data:
-                if pcs['pn'] == current_key:
-                    if not keys:
-                        return pcs['pv']
-                    data = pcs['pch']
-                    found = True
-                    break
-            if not found:
-                raise Exception(f'Key {current_key} not found')
+            while keys:
+                current_key = keys[0]
+                keys = keys[1:]
+                found = False
+                for pcs in data:
+                    if pcs['pn'] == current_key:
+                        if not keys:
+                            return pcs['pv']
+                        data = pcs['pch']
+                        found = True
+                        break
+                if not found:
+                    return None  # Return None instead of raising an exception
+            return None  # Return None if we run out of keys
+        except Exception as e:
+            _LOGGER.debug(f"Error in find_value_by_pn: {e}")
+            return None  # Return None for any exception
 
     @staticmethod
-    def hex_to_temp(value: str, divisor=2) -> float:
-        return int(value[:2], 16) / divisor
+    def hex_to_temp(value: str, divisor=2) -> Optional[float]:
+        """Convert hex value to temperature.
+        
+        Returns None if value is None.
+        """
+        if value is None:
+            return None
+        try:
+            return int(value[:2], 16) / divisor
+        except (ValueError, IndexError, TypeError) as e:
+            _LOGGER.debug(f"Error converting hex to temp: {e}")
+            return None
 
     def set_temperature(self, temperature: float, **kwargs):
         _LOGGER.info("Temp change to " + str(temperature) + " requested.")
@@ -374,8 +401,12 @@ class DaikinClimate(ClimateEntity):
     def get_swing_state(self, data: dict) -> str:
         # The number of zeros in the response seems strange. Don't have time to work out, so this should work
         vertical_attr_name, horizontal_attr_name = HVAC_MODE_TO_SWING_ATTR_NAMES[self.hvac_mode]
-        vertical = "F" in self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", vertical_attr_name)
-        horizontal = "F" in self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", horizontal_attr_name)
+        
+        vertical_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", vertical_attr_name)
+        vertical = "F" in vertical_value if vertical_value is not None else False
+        
+        horizontal_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", horizontal_attr_name)
+        horizontal = "F" in horizontal_value if horizontal_value is not None else False
 
         if horizontal and vertical:
             return SWING_BOTH
@@ -403,36 +434,68 @@ class DaikinClimate(ClimateEntity):
             _LOGGER.debug(data)
 
             # Set the HVAC mode.
-            is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
-            self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
-
-            self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
+            power_state = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01")
+            is_off = power_state == "00" if power_state is not None else True
+            
+            mode_value = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')
+            self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP.get(mode_value, HVACMode.OFF)
+            # Handle the case where outside temperature data might not be available
+            outside_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01')
+            if outside_temp_hex is not None:
+                self._outside_temperature = self.hex_to_temp(outside_temp_hex)
+            else:
+                self._outside_temperature = None
 
             # Only set the target temperature if this mode allows it. Otherwise, it should be set to none.
             name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
             if name is not None:
-                self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
+                target_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name)
+                if target_temp_hex is not None:
+                    self._target_temperature = self.hex_to_temp(target_temp_hex)
+                else:
+                    self._target_temperature = None
             else:
                 self._target_temperature = None
             
             # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
             # for this temperature is limited to integers. So the passed divisor is 1.
-            self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
+            current_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01')
+            if current_temp_hex is not None:
+                self._current_temperature = self.hex_to_temp(current_temp_hex, divisor=1)
+            else:
+                self._current_temperature = None
 
             # If we cannot find a name for this hvac_mode's fan speed, it is automatic. This is the case for dry.
             fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
             if fan_mode_key_name is not None:
-                self._fan_mode = REVERSE_FAN_MODE_MAP[self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[self.hvac_mode])]
+                fan_mode_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[self.hvac_mode])
+                if fan_mode_value is not None and fan_mode_value in REVERSE_FAN_MODE_MAP:
+                    self._fan_mode = REVERSE_FAN_MODE_MAP[fan_mode_value]
+                else:
+                    self._fan_mode = HAFanMode.FAN_AUTO
             else:
                 self._fan_mode = HAFanMode.FAN_AUTO
 
-            self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
+            humidity_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02')
+            if humidity_hex is not None:
+                self._current_humidity = int(humidity_hex, 16)
+            else:
+                self._current_humidity = None
 
             if not self.hvac_mode == HVACMode.OFF:
                 self._swing_mode = self.get_swing_state(data)
             
-            self._energy_today = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1])
-            self._runtime_today = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime'))
+            energy_data = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')
+            if energy_data is not None and len(energy_data) > 0:
+                self._energy_today = int(energy_data[-1])
+            else:
+                self._energy_today = 0
+                
+            runtime_data = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
+            if runtime_data is not None:
+                self._runtime_today = int(runtime_data)
+            else:
+                self._runtime_today = 0
             
         except Exception as e:
             _LOGGER.error(f"Error updating Daikin AC: {e}")
