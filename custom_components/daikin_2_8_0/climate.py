@@ -404,13 +404,13 @@ class DaikinClimate(ClimateEntity):
             # Special case for week_power data
             if fr == '/dsiot/edge/adr_0100.i_power.week_power':
                 if pc.get('pn') == 'week_power':
-                    if len(keys) > 1:
-                        if keys[1] == 'datas' and len(pc.get('pch', [])) > 1:
-                            _LOGGER.debug(f"Found week power data: {pc.get('pch', [])[1].get('pv')}")
-                            return pc.get('pch', [])[1].get('pv')
-                        elif keys[1] == 'today_runtime' and len(pc.get('pch', [])) > 0:
-                            _LOGGER.debug(f"Found today runtime: {pc.get('pch', [])[0].get('pv')}")
-                            return pc.get('pch', [])[0].get('pv')
+                    for item in pc.get('pch', []):
+                        if item.get('pn') == 'today_runtime':
+                            _LOGGER.debug(f"Found today runtime: {item.get('pv')}")
+                            return item.get('pv')
+                        elif item.get('pn') == 'datas':
+                            _LOGGER.debug(f"Found week power data: {item.get('pv')}")
+                            return item.get('pv')
             
             # If we couldn't find the value with direct access, log it
             _LOGGER.debug(f"Could not find value for path: {fr} -> {' -> '.join(keys)}")
@@ -493,9 +493,24 @@ class DaikinClimate(ClimateEntity):
         outside_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01')
         
         if outside_temp_hex is not None:
-            temp = self.hex_to_temp(outside_temp_hex)
-            _LOGGER.debug(f"Converted outside temperature: {temp}")
-            return temp
+            try:
+                # Convert the hex value to a float
+                if isinstance(outside_temp_hex, str):
+                    # Handle string values (hex)
+                    temp = self.hex_to_temp(outside_temp_hex)
+                elif isinstance(outside_temp_hex, (int, float)):
+                    # Handle numeric values
+                    temp = float(outside_temp_hex) / 2
+                else:
+                    # Handle other types
+                    _LOGGER.warning(f"Unexpected outside temperature type: {type(outside_temp_hex)}")
+                    return None
+                
+                _LOGGER.debug(f"Converted outside temperature: {temp}")
+                return temp
+            except Exception as e:
+                _LOGGER.error(f"Error converting outside temperature: {e}")
+                return None
         else:
             _LOGGER.debug("Outside temperature not available")
             return None
