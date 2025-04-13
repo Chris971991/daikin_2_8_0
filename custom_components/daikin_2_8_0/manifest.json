@@ -1,0 +1,12 @@
+{
+    "domain": "daikin_2_8_0",
+    "name": "Daikin 2.8.0",
+    "documentation": "https://github.com/Chris971991/daikin_2_8_0",
+    "issue_tracker": "https://github.com/Chris971991/daikin_2_8_0/issues",
+    "dependencies": [],
+    "codeowners": ["@Chris971991"],
+    "requirements": [],
+    "iot_class": "local_polling",
+    "version": "1.0.0",
+    "config_flow": false
+  }
