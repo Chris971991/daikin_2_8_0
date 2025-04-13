@@ -296,11 +296,14 @@ class DaikinClimate(ClimateEntity):
 
     @property
     def extra_state_attributes(self):
-        return {
+        """Return entity specific state attributes."""
+        attributes = {
             "outside_temperature": self._outside_temperature,
             "runtime_today": self._runtime_today,
             "energy_today": self._energy_today
         }
+        _LOGGER.info(f"Returning attributes: {attributes}")
+        return attributes
 
     def set_hvac_mode(self, hvac_mode):
         _LOGGER.info("Set Hvac mode to " + str(hvac_mode))
@@ -377,29 +380,43 @@ class DaikinClimate(ClimateEntity):
         For values that look like hex codes (e.g., '1400'), convert from hex.
         For values that look like direct numbers (e.g., '12.5'), convert directly.
         """
+        _LOGGER.info(f"Converting temperature value: {value} (type: {type(value)})")
+        
         # First check if it's a direct numeric value with a decimal point
         if isinstance(value, str) and '.' in value:
             try:
-                return float(value)
-            except (ValueError, TypeError):
+                result = float(value)
+                _LOGGER.info(f"Converted decimal string to float: {value} -> {result}")
+                return result
+            except (ValueError, TypeError) as e:
+                _LOGGER.info(f"Failed to convert decimal string: {e}")
                 pass
                 
         # Check if it's a typical hex temperature code (4 chars, no decimal)
         if isinstance(value, str) and len(value) == 4 and all(c in '0123456789ABCDEFabcdef' for c in value):
             try:
-                return int(value[:2], 16) / divisor
-            except (ValueError, TypeError):
+                result = int(value[:2], 16) / divisor
+                _LOGGER.info(f"Converted 4-char hex to float: {value} -> {result} (hex: {value[:2]} -> {int(value[:2], 16)})")
+                return result
+            except (ValueError, TypeError) as e:
+                _LOGGER.info(f"Failed to convert 4-char hex: {e}")
                 pass
         
         # For any other format, try direct conversion first
         try:
-            return float(value)
-        except (ValueError, TypeError):
+            result = float(value)
+            _LOGGER.info(f"Converted direct to float: {value} -> {result}")
+            return result
+        except (ValueError, TypeError) as e:
+            _LOGGER.info(f"Failed direct float conversion: {e}")
             # If that fails, try hex as a last resort
             try:
                 if isinstance(value, str) and len(value) >= 2:
-                    return int(value[:2], 16) / divisor
-            except (ValueError, TypeError):
+                    result = int(value[:2], 16) / divisor
+                    _LOGGER.info(f"Converted string to hex as last resort: {value} -> {result}")
+                    return result
+            except (ValueError, TypeError) as e:
+                _LOGGER.info(f"Failed last resort hex conversion: {e}")
                 pass
                 
         # If all else fails, return 0
@@ -474,7 +491,7 @@ class DaikinClimate(ClimateEntity):
             data = response.json()
             
             # Enhanced debugging to understand the API response structure
-            _LOGGER.debug("Full API response: %s", data)
+            _LOGGER.info("Full API response: %s", data)
             
             # Specifically log the structure of the second request which should contain outside temperature
             for resp in data.get('responses', []):
@@ -483,6 +500,10 @@ class DaikinClimate(ClimateEntity):
                     # Explore the structure to find potential paths to outside temperature
                     if 'pc' in resp:
                         _LOGGER.info("PC structure: %s", resp['pc'])
+                elif resp.get('fr') == '/dsiot/edge/adr_0200.sensor':
+                    _LOGGER.info("Found sensor response: %s", resp)
+                    if 'pc' in resp:
+                        _LOGGER.info("Sensor PC structure: %s", resp['pc'])
 
             # Set the HVAC mode
             try:
@@ -508,8 +529,9 @@ class DaikinClimate(ClimateEntity):
             # First try the standard paths
             for path in outside_temp_paths:
                 try:
-                    _LOGGER.debug(f"Trying outside temperature path: {path}")
+                    _LOGGER.info(f"Trying outside temperature path: {path}")
                     outside_temp_hex = self.find_value_by_pn(data, *path)
+                    _LOGGER.info(f"Found outside temperature hex value: {outside_temp_hex}")
                     self._outside_temperature = self.hex_to_temp(outside_temp_hex)
                     _LOGGER.info(f"Successfully read outside temperature: {self._outside_temperature}°C from hex value {outside_temp_hex} using path {path}")
                     outside_temp_found = True
@@ -530,13 +552,19 @@ class DaikinClimate(ClimateEntity):
                     
                     for sensor_path in sensor_paths:
                         try:
+                            _LOGGER.info(f"Trying sensor path: {sensor_path}")
                             outside_temp_value = self.find_value_by_pn(data, *sensor_path)
+                            _LOGGER.info(f"Found outside temperature value from sensor: {outside_temp_value} (type: {type(outside_temp_value)})")
+                            
                             # Check if the value is already a number or needs conversion
                             if isinstance(outside_temp_value, (int, float)):
                                 self._outside_temperature = float(outside_temp_value)
+                                _LOGGER.info(f"Converted direct numeric value to: {self._outside_temperature}")
                             else:
                                 # Try to convert from hex if it's a string
+                                old_value = self._outside_temperature
                                 self._outside_temperature = self.hex_to_temp(outside_temp_value)
+                                _LOGGER.info(f"Converted from hex/string: {outside_temp_value} -> {self._outside_temperature} (was: {old_value})")
                             
                             _LOGGER.info(f"Successfully read outside temperature from sensor endpoint: {self._outside_temperature}°C using path {sensor_path}")
                             outside_temp_found = True
