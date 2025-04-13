@@ -328,6 +328,10 @@ class DaikinClimate(ClimateEntity):
 
     @staticmethod
     def find_value_by_pn(data:dict, fr: str, *keys):
+        """Find a value in the response by path.
+        
+        This method handles the specific structure of the Daikin API response.
+        """
         try:
             # Add detailed logging
             _LOGGER.debug(f"Finding value for path: {fr} -> {' -> '.join(keys)}")
@@ -343,43 +347,73 @@ class DaikinClimate(ClimateEntity):
                 _LOGGER.debug(f"No response with fr={fr} found")
                 return None
                 
-            # Get the 'pc' from the first matching response
-            data = matching_responses[0].get('pc')
-            if not data:
-                _LOGGER.debug(f"No 'pc' in response with fr={fr}")
-                return None
-                
-            # Now traverse through the keys
-            for i, current_key in enumerate(keys):
-                _LOGGER.debug(f"Looking for key {current_key} (step {i+1}/{len(keys)})")
-                
-                # If we're at a leaf node (no 'pch')
-                if 'pch' not in data:
-                    if data.get('pn') == current_key:
-                        _LOGGER.debug(f"Found value at leaf node: {data.get('pv')}")
-                        return data.get('pv')
-                    else:
-                        _LOGGER.debug(f"Key {current_key} not found at leaf node")
-                        return None
-                
-                # Look for the key in the children
-                found = False
-                for child in data.get('pch', []):
-                    if child.get('pn') == current_key:
-                        # If this is the last key, return the value
-                        if i == len(keys) - 1:
-                            _LOGGER.debug(f"Found final value: {child.get('pv')}")
-                            return child.get('pv')
-                        # Otherwise, continue traversing
-                        data = child
-                        found = True
-                        break
-                
-                if not found:
-                    _LOGGER.debug(f"Key {current_key} not found in children")
-                    return None
+            # Get the response
+            response = matching_responses[0]
             
-            _LOGGER.debug("Reached end of keys without finding value")
+            # Get the PC object
+            pc = response.get('pc', {})
+            
+            # Skip the first key (usually 'dgc_status' or 'week_power') since it's the value of pc['pn']
+            if len(keys) > 0 and pc.get('pn') == keys[0]:
+                keys = keys[1:]
+            
+            # Special case for outside temperature
+            if 'e_A00D' in keys and 'p_01' in keys and keys[-1] == 'p_01':
+                for item in pc.get('pch', []):
+                    if item.get('pn') == 'e_1003':
+                        for sub_item in item.get('pch', []):
+                            if sub_item.get('pn') == 'e_A00D':
+                                for p_item in sub_item.get('pch', []):
+                                    if p_item.get('pn') == 'p_01':
+                                        _LOGGER.debug(f"Found outside temp: {p_item.get('pv')}")
+                                        return p_item.get('pv')
+            
+            # Special case for current temperature and humidity
+            if 'e_A00B' in keys and ('p_01' in keys or 'p_02' in keys):
+                for item in pc.get('pch', []):
+                    if item.get('pn') == 'e_1002':
+                        for sub_item in item.get('pch', []):
+                            if sub_item.get('pn') == 'e_A00B':
+                                for p_item in sub_item.get('pch', []):
+                                    if p_item.get('pn') == keys[-1]:  # p_01 or p_02
+                                        _LOGGER.debug(f"Found temperature/humidity: {p_item.get('pv')}")
+                                        return p_item.get('pv')
+            
+            # Special case for power state
+            if 'e_A002' in keys and 'p_01' in keys:
+                for item in pc.get('pch', []):
+                    if item.get('pn') == 'e_1002':
+                        for sub_item in item.get('pch', []):
+                            if sub_item.get('pn') == 'e_A002':
+                                for p_item in sub_item.get('pch', []):
+                                    if p_item.get('pn') == 'p_01':
+                                        _LOGGER.debug(f"Found power state: {p_item.get('pv')}")
+                                        return p_item.get('pv')
+            
+            # Special case for HVAC mode
+            if 'e_3001' in keys and 'p_01' in keys:
+                for item in pc.get('pch', []):
+                    if item.get('pn') == 'e_1002':
+                        for sub_item in item.get('pch', []):
+                            if sub_item.get('pn') == 'e_3001':
+                                for p_item in sub_item.get('pch', []):
+                                    if p_item.get('pn') == 'p_01':
+                                        _LOGGER.debug(f"Found HVAC mode: {p_item.get('pv')}")
+                                        return p_item.get('pv')
+            
+            # Special case for week_power data
+            if fr == '/dsiot/edge/adr_0100.i_power.week_power':
+                if pc.get('pn') == 'week_power':
+                    if len(keys) > 1:
+                        if keys[1] == 'datas' and len(pc.get('pch', [])) > 1:
+                            _LOGGER.debug(f"Found week power data: {pc.get('pch', [])[1].get('pv')}")
+                            return pc.get('pch', [])[1].get('pv')
+                        elif keys[1] == 'today_runtime' and len(pc.get('pch', [])) > 0:
+                            _LOGGER.debug(f"Found today runtime: {pc.get('pch', [])[0].get('pv')}")
+                            return pc.get('pch', [])[0].get('pv')
+            
+            # If we couldn't find the value with direct access, log it
+            _LOGGER.debug(f"Could not find value for path: {fr} -> {' -> '.join(keys)}")
             return None
             
         except Exception as e:
@@ -452,48 +486,11 @@ class DaikinClimate(ClimateEntity):
         return SWING_OFF
         
     def _extract_outside_temperature(self, data: dict) -> Optional[float]:
-        """Extract the outside temperature from the API response.
-        
-        Tries multiple paths to find the outside temperature.
-        """
+        """Extract the outside temperature from the API response."""
         _LOGGER.debug("Attempting to find outside temperature")
         
-        # Try the primary path
+        # Try to find the outside temperature
         outside_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01')
-        _LOGGER.debug(f"Primary path outside temperature hex value: {outside_temp_hex}")
-        
-        # If primary path fails, try alternative paths
-        if outside_temp_hex is None:
-            # Try direct access to e_A00D
-            _LOGGER.debug("Trying alternative path for outside temperature")
-            outside_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_A00D', 'p_01')
-            _LOGGER.debug(f"Alternative path outside temperature hex value: {outside_temp_hex}")
-            
-            # If that fails too, try looking at the raw response
-            if outside_temp_hex is None and 'responses' in data:
-                _LOGGER.debug("Trying to find e_A00D in raw response")
-                for response in data['responses']:
-                    if response.get('fr') == '/dsiot/edge/adr_0200.dgc_status':
-                        _LOGGER.debug("Found adr_0200 response, dumping structure for debugging")
-                        _LOGGER.debug(f"Response structure: {response}")
-                        
-                        # Try to find e_A00D directly in the response
-                        try:
-                            pc = response.get('pc', {})
-                            pch = pc.get('pch', [])
-                            for item in pch:
-                                if item.get('pn') == 'e_1003':
-                                    e_1003 = item
-                                    for sub_item in e_1003.get('pch', []):
-                                        if sub_item.get('pn') == 'e_A00D':
-                                            e_A00D = sub_item
-                                            for p_item in e_A00D.get('pch', []):
-                                                if p_item.get('pn') == 'p_01':
-                                                    outside_temp_hex = p_item.get('pv')
-                                                    _LOGGER.debug(f"Found outside temp in raw response: {outside_temp_hex}")
-                                                    break
-                        except Exception as e:
-                            _LOGGER.debug(f"Error parsing raw response: {e}")
         
         if outside_temp_hex is not None:
             temp = self.hex_to_temp(outside_temp_hex)
