@@ -1,0 +1,22 @@
+{
+    "config": {
+      "step": {
+        "user": {
+          "title": "Set up Daikin Air Conditioner",
+          "description": "Enter the IP address of your Daikin air conditioner",
+          "data": {
+            "ip_address": "IP Address",
+            "friendly_name": "Friendly Name (optional)"
+          }
+        }
+      },
+      "error": {
+        "invalid_ip": "Invalid IP address format",
+        "cannot_connect": "Failed to connect to the device. Please check the IP address and make sure the device is on the same network.",
+        "unknown": "Unexpected error occurred. Please check the logs for more information."
+      },
+      "abort": {
+        "already_configured": "This device is already configured"
+      }
+    }
+  }

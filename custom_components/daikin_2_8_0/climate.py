@@ -131,42 +131,24 @@ class DaikinRequest:
             entry.append(attribute.format())
         return payload
 
+async def async_setup_entry(hass, entry, async_add_entities):
+    """Set up the Daikin climate device from a config entry."""
+    ip_address = entry.data[CONF_IP_ADDRESS]
+    
+    # The climate entity is already created in __init__.py
+    if ip_address in hass.data[DOMAIN]:
+        climate_entity = hass.data[DOMAIN][ip_address]["climate"]
+        async_add_entities([climate_entity])
+    else:
+        _LOGGER.error("Climate entity for %s not found", ip_address)
+        
 async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    """Set up the air conditioner platform."""
+    """Set up the air conditioner platform through YAML."""
     if discovery_info is None:
         return
-
-    ip_address = discovery_info.get("ip_address")
-    friendly_name = discovery_info.get("friendly_name", f"Daikin {ip_address}")
-    
-    # Create the climate entity
-    climate_entity = DaikinClimate(ip_address, friendly_name)
-    await hass.async_add_executor_job(climate_entity.update)
-    await climate_entity.initialize_unique_id(hass)
-    
-    # Create and store the coordinator
-    coordinator = DaikinDataUpdateCoordinator(hass, climate_entity)
-    await coordinator.async_config_entry_first_refresh()
-    
-    # Store both the climate entity and coordinator in hass.data
-    hass.data[DOMAIN][ip_address] = {
-        "climate": climate_entity,
-        "coordinator": coordinator
-    }
-    
-    # Add the climate entity
-    async_add_entities([climate_entity])
-    
-    # Set up the sensor and binary_sensor platforms
-    for platform in ["sensor", "binary_sensor"]:
-        hass.async_create_task(
-            hass.helpers.discovery.async_load_platform(
-                platform, 
-                DOMAIN, 
-                {"ip_address": ip_address}, 
-                config
-            )
-        )
+        
+    # This is only for backward compatibility and should not be used
+    _LOGGER.warning("YAML configuration is deprecated, please use the UI configuration")
 
 class DaikinClimate(ClimateEntity):
     """Representation of a Daikin climate device."""

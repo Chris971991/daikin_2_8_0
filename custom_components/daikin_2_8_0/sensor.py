@@ -16,6 +16,7 @@ from homeassistant.const import (
     UnitOfEnergy,
     UnitOfTemperature,
     UnitOfTime,
+    CONF_IP_ADDRESS,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
@@ -93,23 +94,18 @@ SENSOR_TYPES = {
     },
 }
 
-async def async_setup_platform(
-    hass: HomeAssistant, 
-    config: Dict[str, Any], 
-    async_add_entities: AddEntitiesCallback, 
-    discovery_info=None
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry, 
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up Daikin 2.8.0 sensor entities."""
-    if discovery_info is None:
-        return
-
-    ip_address = discovery_info.get("ip_address")
+    """Set up sensors for Daikin 2.8.0 based on config_entry."""
+    ip_address = entry.data[CONF_IP_ADDRESS]
     
     if ip_address not in hass.data[DOMAIN]:
         _LOGGER.error(f"No coordinator for IP address {ip_address}")
         return
         
-    coordinator = hass.data[DOMAIN][ip_address]["coordinator"]
     climate_entity = hass.data[DOMAIN][ip_address]["climate"]
     
     entities = []
@@ -124,6 +120,20 @@ async def async_setup_platform(
         )
     
     async_add_entities(entities)
+    
+    
+async def async_setup_platform(
+    hass: HomeAssistant, 
+    config: Dict[str, Any], 
+    async_add_entities: AddEntitiesCallback, 
+    discovery_info=None
+) -> None:
+    """Set up Daikin 2.8.0 sensor entities through YAML."""
+    # This is for backward compatibility only
+    if discovery_info is None:
+        return
+        
+    _LOGGER.warning("YAML configuration is deprecated, please use the UI configuration")
 
 
 class DaikinSensor(SensorEntity):

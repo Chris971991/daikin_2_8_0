@@ -29,7 +29,17 @@ A comprehensive integration for Daikin air conditioners using local API control.
 
 ## Configuration
 
-Add the following to your `configuration.yaml`:
+### Using the UI (Recommended)
+
+1. Go to **Configuration** → **Integrations**
+2. Click the **+ ADD INTEGRATION** button
+3. Search for "Daikin 2.8.0" 
+4. Enter the IP address of your Daikin air conditioner
+5. (Optional) Enter a friendly name for the device
+
+### Using YAML (Legacy Method)
+
+This method is still supported for backward compatibility but is not recommended for new setups:
 
 ```yaml
 daikin_2_8_0:
@@ -60,6 +70,10 @@ After setup, your Daikin AC will appear as a device with the following entities:
 - Running Status
 - Cooling Status
 - Heating Status
+
+## Screenshots
+
+[Screenshots would be here]
 
 ## Troubleshooting
 

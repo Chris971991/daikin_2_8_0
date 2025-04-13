@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import asyncio
 from datetime import timedelta
 
 import voluptuous as vol
@@ -19,6 +18,7 @@ _LOGGER = logging.getLogger(__name__)
 DOMAIN = "daikin_2_8_0"
 UPDATE_INTERVAL = timedelta(seconds=60)
 
+# This schema is for backward compatibility with YAML configuration
 CONFIG_SCHEMA = vol.Schema(
     {
         DOMAIN: vol.Schema(
@@ -37,24 +37,27 @@ PLATFORMS = [Platform.CLIMATE, Platform.SENSOR, Platform.BINARY_SENSOR]
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up the Daikin 2.8.0 component."""
+    """Set up the Daikin 2.8.0 component from YAML."""
     if DOMAIN not in config:
         return True
 
+    # Set up entries from YAML (legacy support)
     domain_config = config[DOMAIN]
     hass.data.setdefault(DOMAIN, {})
 
-    # Set up the climate entity first
+    # Import YAML configurations as config entries
     for ip_address in domain_config[CONF_IP_ADDRESS]:
         friendly_name = domain_config.get(CONF_FRIENDLY_NAME, {}).get(ip_address, f"Daikin {ip_address}")
         
-        # Pass the discovery info to the climate platform
+        # Import the config
         hass.async_create_task(
-            hass.helpers.discovery.async_load_platform(
-                Platform.CLIMATE, 
-                DOMAIN, 
-                {"ip_address": ip_address, "friendly_name": friendly_name},
-                config
+            hass.config_entries.flow.async_init(
+                DOMAIN,
+                context={"source": "import"},
+                data={
+                    CONF_IP_ADDRESS: ip_address,
+                    CONF_FRIENDLY_NAME: friendly_name,
+                },
             )
         )
     
@@ -64,15 +67,48 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Daikin 2.8.0 from a config entry."""
     hass.data.setdefault(DOMAIN, {})
-
-    # Forward the setup to the platforms
+    
+    ip_address = entry.data[CONF_IP_ADDRESS]
+    friendly_name = entry.data.get(CONF_FRIENDLY_NAME, f"Daikin {ip_address}")
+    
+    # Create the climate entity
+    from .climate import DaikinClimate
+    
+    climate_entity = DaikinClimate(ip_address, friendly_name)
+    await hass.async_add_executor_job(climate_entity.update)
+    await climate_entity.initialize_unique_id(hass)
+    
+    # Create and store the coordinator
+    coordinator = DaikinDataUpdateCoordinator(hass, climate_entity)
+    await coordinator.async_config_entry_first_refresh()
+    
+    # Store both the climate entity and coordinator in hass.data
+    hass.data[DOMAIN][ip_address] = {
+        "climate": climate_entity,
+        "coordinator": coordinator,
+        "entry_id": entry.entry_id,
+    }
+    
+    # Set up all the platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    
+    # Update the entry with the MAC address for true uniqueness
+    # This happens after setup so we have time to get the MAC
+    if entry.unique_id != climate_entity._mac:
+        hass.config_entries.async_update_entry(entry, unique_id=climate_entity._mac)
+    
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    ip_address = entry.data[CONF_IP_ADDRESS]
+    
+    if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        if ip_address in hass.data[DOMAIN]:
+            hass.data[DOMAIN].pop(ip_address)
+            
+    return unload_ok
 
 
 class DaikinDataUpdateCoordinator(DataUpdateCoordinator):
