@@ -411,22 +411,20 @@ class DaikinClimate(ClimateEntity):
             except Exception as e:
                 _LOGGER.warning(f"Error setting HVAC mode: {e}")
 
-            # Get outside temperature - exactly like the test code
+            # For outside temperature:
             try:
-                self._outside_temperature = self.hex_to_temp(
-                    self.find_value_by_pn(
-                        data,
-                        '/dsiot/edge/adr_0200.dgc_status',
-                        'dgc_status',
-                        'e_1003',
-                        'e_A00D',
-                        'p_01'
-                    )
+                outside_temp_hex = self.find_value_by_pn(
+                    data,
+                    '/dsiot/edge/adr_0200.dgc_status',
+                    'dgc_status',
+                    'e_1003',
+                    'e_A00D',
+                    'p_01'
                 )
-                _LOGGER.debug(f"Outside temperature: {self._outside_temperature}")
+                self._outside_temperature = self.hex_to_temp(outside_temp_hex)
+                _LOGGER.info(f"Successfully read outside temperature: {self._outside_temperature}°C from hex value {outside_temp_hex}")
             except Exception as e:
-                _LOGGER.warning(f"Error reading outside temperature: {e}")
-                # If this is the first time and no value exists, set a default
+                _LOGGER.error(f"Error reading outside temperature: {e}")
                 if self._outside_temperature is None:
                     self._outside_temperature = 0
 
@@ -493,7 +491,7 @@ class DaikinClimate(ClimateEntity):
             except Exception as e:
                 _LOGGER.warning(f"Error reading swing mode: {e}")
             
-            # Get energy today - exactly like the test code
+            # For energy today:
             try:
                 energy_data = self.find_value_by_pn(
                     data,
@@ -502,26 +500,27 @@ class DaikinClimate(ClimateEntity):
                     'datas'
                 )
                 if isinstance(energy_data, list) and len(energy_data) > 0:
-                    self._energy_today = int(energy_data[-1])  # Last value represents today
-                    _LOGGER.debug(f"Energy today: {self._energy_today}")
+                    self._energy_today = int(energy_data[-1])
+                    _LOGGER.info(f"Successfully read energy today: {self._energy_today}")
             except Exception as e:
-                _LOGGER.warning(f"Error reading energy today: {e}")
-                # Keep previous value
+                _LOGGER.error(f"Error reading energy today: {e}")
+                if self._energy_today is None:
+                    self._energy_today = 0
             
-            # Get runtime today - exactly like the test code
+            # For runtime today:
             try:
-                self._runtime_today = int(
-                    self.find_value_by_pn(
-                        data,
-                        '/dsiot/edge/adr_0100.i_power.week_power',
-                        'week_power',
-                        'today_runtime'
-                    )
+                runtime = self.find_value_by_pn(
+                    data,
+                    '/dsiot/edge/adr_0100.i_power.week_power',
+                    'week_power',
+                    'today_runtime'
                 )
-                _LOGGER.debug(f"Runtime today: {self._runtime_today}")
+                self._runtime_today = int(runtime)
+                _LOGGER.info(f"Successfully read runtime today: {self._runtime_today} minutes")
             except Exception as e:
-                _LOGGER.warning(f"Error reading runtime today: {e}")
-                # Keep previous value
+                _LOGGER.error(f"Error reading runtime today: {e}")
+                if self._runtime_today is None:
+                    self._runtime_today = 0
             
         except Exception as e:
             _LOGGER.error(f"Error updating Daikin AC: {e}")
