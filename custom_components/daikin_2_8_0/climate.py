@@ -580,14 +580,18 @@ class DaikinClimate(ClimateEntity):
                 self._swing_mode = self.get_swing_state(data)
             
             energy_data = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')
-            if energy_data is not None and len(energy_data) > 0:
+            if energy_data is not None and isinstance(energy_data, list) and len(energy_data) > 0:
                 self._energy_today = int(energy_data[-1])
             else:
                 self._energy_today = 0
                 
             runtime_data = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
             if runtime_data is not None:
-                self._runtime_today = int(runtime_data)
+                try:
+                    self._runtime_today = int(runtime_data)
+                except (ValueError, TypeError):
+                    _LOGGER.warning(f"Could not convert runtime data to int: {runtime_data}")
+                    self._runtime_today = 0
             else:
                 self._runtime_today = 0
             
