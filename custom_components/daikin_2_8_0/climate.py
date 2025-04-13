@@ -163,12 +163,12 @@ class DaikinClimate(ClimateEntity):
         self._fan_mode = HAFanMode.FAN_QUIET
         self._swing_mode = SWING_OFF
         self._temperature = None
-        self._outside_temperature = None
+        self._outside_temperature = 0  # Initialize with default value
         self._target_temperature = None
         self._current_temperature = None
-        self._current_humidity = None
-        self._runtime_today = 0
-        self._energy_today = 0
+        self._current_humidity = 0  # Initialize with default value
+        self._runtime_today = 0  # Initialize with default value
+        self._energy_today = 0  # Initialize with default value
         self._mac = None
         self._max_temp = 30
         self._min_temp = 10
@@ -392,7 +392,8 @@ class DaikinClimate(ClimateEntity):
             "requests": [
                 {"op": 2, "to": "/dsiot/edge/adr_0100.dgc_status?filter=pv,pt,md"},
                 {"op": 2, "to": "/dsiot/edge/adr_0200.dgc_status?filter=pv,pt,md"},
-                {"op": 2, "to": "/dsiot/edge/adr_0100.i_power.week_power?filter=pv,pt,md"}
+                {"op": 2, "to": "/dsiot/edge/adr_0100.i_power.week_power?filter=pv,pt,md"},
+                {"op": 2, "to": "/dsiot/edge.adp_i"}  # Add this to potentially get otemp directly
             ]
         }
 
@@ -403,36 +404,87 @@ class DaikinClimate(ClimateEntity):
             _LOGGER.debug(data)
 
             # Set the HVAC mode.
-            is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
-            self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
+            try:
+                is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
+                self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
+            except Exception as e:
+                _LOGGER.warning(f"Error setting HVAC mode: {e}")
+                # Keep existing value
 
-            self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
+            # Try to get outside temperature
+            try:
+                outside_temp_hex = self.find_value_by_pn(
+                    data,
+                    '/dsiot/edge/adr_0200.dgc_status',
+                    'dgc_status',
+                    'e_1003',
+                    'e_A00D',
+                    'p_01'
+                )
+                self._outside_temperature = self.hex_to_temp(outside_temp_hex)
+                _LOGGER.debug(f"Successfully read outside temperature: {self._outside_temperature}°C")
+            except Exception as e:
+                _LOGGER.warning(f"Error reading outside temperature: {e}")
+                # Value will stay as previously set
 
             # Only set the target temperature if this mode allows it. Otherwise, it should be set to none.
-            name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
-            if name is not None:
-                self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
-            else:
-                self._target_temperature = None
+            try:
+                name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
+                if name is not None:
+                    self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
+                else:
+                    self._target_temperature = None
+            except Exception as e:
+                _LOGGER.warning(f"Error setting target temperature: {e}")
+                # Keep existing value
             
             # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
             # for this temperature is limited to integers. So the passed divisor is 1.
-            self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
+            try:
+                self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
+            except Exception as e:
+                _LOGGER.warning(f"Error reading current temperature: {e}")
+                # If value wasn't previously set, set it now
+                if self._current_temperature is None:
+                    self._current_temperature = 0
 
             # If we cannot find a name for this hvac_mode's fan speed, it is automatic. This is the case for dry.
-            fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
-            if fan_mode_key_name is not None:
-                self._fan_mode = REVERSE_FAN_MODE_MAP[self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[self.hvac_mode])]
-            else:
-                self._fan_mode = HAFanMode.FAN_AUTO
+            try:
+                fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
+                if fan_mode_key_name is not None:
+                    self._fan_mode = REVERSE_FAN_MODE_MAP[self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[self.hvac_mode])]
+                else:
+                    self._fan_mode = HAFanMode.FAN_AUTO
+            except Exception as e:
+                _LOGGER.warning(f"Error reading fan mode: {e}")
+                # Keep existing value
 
-            self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
+            try:
+                self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
+            except Exception as e:
+                _LOGGER.warning(f"Error reading humidity: {e}")
+                # Keep existing value
 
-            if not self.hvac_mode == HVACMode.OFF:
-                self._swing_mode = self.get_swing_state(data)
+            try:
+                if not self.hvac_mode == HVACMode.OFF:
+                    self._swing_mode = self.get_swing_state(data)
+            except Exception as e:
+                _LOGGER.warning(f"Error reading swing mode: {e}")
+                # Keep existing value
             
-            self._energy_today = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1])
-            self._runtime_today = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime'))
+            try:
+                self._energy_today = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1])
+                _LOGGER.debug(f"Successfully read energy today: {self._energy_today}")
+            except Exception as e:
+                _LOGGER.warning(f"Error reading energy today: {e}")
+                # Value will stay as previously set
+            
+            try:
+                self._runtime_today = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime'))
+                _LOGGER.debug(f"Successfully read runtime today: {self._runtime_today}")
+            except Exception as e:
+                _LOGGER.warning(f"Error reading runtime today: {e}")
+                # Value will stay as previously set
             
         except Exception as e:
             _LOGGER.error(f"Error updating Daikin AC: {e}")
