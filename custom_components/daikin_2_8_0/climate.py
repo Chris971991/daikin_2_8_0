@@ -296,14 +296,11 @@ class DaikinClimate(ClimateEntity):
 
     @property
     def extra_state_attributes(self):
-        """Return entity specific state attributes."""
-        attributes = {
+        return {
             "outside_temperature": self._outside_temperature,
             "runtime_today": self._runtime_today,
             "energy_today": self._energy_today
         }
-        _LOGGER.info(f"Returning attributes: {attributes}")
-        return attributes
 
     def set_hvac_mode(self, hvac_mode):
         _LOGGER.info("Set Hvac mode to " + str(hvac_mode))
@@ -322,106 +319,25 @@ class DaikinClimate(ClimateEntity):
 
     @staticmethod
     def find_value_by_pn(data:dict, fr: str, *keys):
-        """Find a value in the nested response data structure.
-        
-        Args:
-            data: The response data
-            fr: The response path to look for
-            *keys: The sequence of keys to navigate through
-            
-        Returns:
-            The value found at the specified path
-            
-        Raises:
-            Exception: If the path is not found
-        """
-        # First, find the response with the matching 'fr' value
-        matching_responses = [x for x in data.get('responses', []) if x.get('fr') == fr]
-        
-        if not matching_responses:
-            available_responses = [x.get('fr') for x in data.get('responses', [])]
-            raise Exception(f'Response path {fr} not found. Available paths: {available_responses}')
-        
-        # Extract the 'pc' field from the matching response
-        data = [x.get('pc', {}) for x in matching_responses]
-        
-        # Log the initial data structure for debugging
-        _LOGGER.debug(f"Initial data structure for path {fr}: {data}")
-        
-        # Navigate through the keys
+        data = [ x['pc'] for x in data['responses'] if x['fr'] == fr ]
+
         while keys:
             current_key = keys[0]
             keys = keys[1:]
             found = False
-            
             for pcs in data:
-                if pcs.get('pn') == current_key:
+                if pcs['pn'] == current_key:
                     if not keys:
-                        if 'pv' in pcs:
-                            return pcs['pv']
-                        else:
-                            raise Exception(f'Value not found for key {current_key}')
-                    
-                    if 'pch' in pcs:
-                        data = pcs['pch']
-                        found = True
-                        break
-                    else:
-                        raise Exception(f'No children found for key {current_key}')
-            
+                        return pcs['pv']
+                    data = pcs['pch']
+                    found = True
+                    break
             if not found:
-                available_keys = [pcs.get('pn') for pcs in data if 'pn' in pcs]
-                raise Exception(f'Key {current_key} not found. Available keys: {available_keys}')
+                raise Exception(f'Key {current_key} not found')
 
     @staticmethod
     def hex_to_temp(value: str, divisor=2) -> float:
-        """Convert temperature value to float.
-        
-        For values that look like hex codes (e.g., '1400'), convert from hex.
-        For values that look like direct numbers (e.g., '12.5'), convert directly.
-        """
-        _LOGGER.info(f"Converting temperature value: {value} (type: {type(value)})")
-        
-        # First check if it's a direct numeric value with a decimal point
-        if isinstance(value, str) and '.' in value:
-            try:
-                result = float(value)
-                _LOGGER.info(f"Converted decimal string to float: {value} -> {result}")
-                return result
-            except (ValueError, TypeError) as e:
-                _LOGGER.info(f"Failed to convert decimal string: {e}")
-                pass
-                
-        # Check if it's a typical hex temperature code (4 chars, no decimal)
-        if isinstance(value, str) and len(value) == 4 and all(c in '0123456789ABCDEFabcdef' for c in value):
-            try:
-                result = int(value[:2], 16) / divisor
-                _LOGGER.info(f"Converted 4-char hex to float: {value} -> {result} (hex: {value[:2]} -> {int(value[:2], 16)})")
-                return result
-            except (ValueError, TypeError) as e:
-                _LOGGER.info(f"Failed to convert 4-char hex: {e}")
-                pass
-        
-        # For any other format, try direct conversion first
-        try:
-            result = float(value)
-            _LOGGER.info(f"Converted direct to float: {value} -> {result}")
-            return result
-        except (ValueError, TypeError) as e:
-            _LOGGER.info(f"Failed direct float conversion: {e}")
-            # If that fails, try hex as a last resort
-            try:
-                if isinstance(value, str) and len(value) >= 2:
-                    result = int(value[:2], 16) / divisor
-                    _LOGGER.info(f"Converted string to hex as last resort: {value} -> {result}")
-                    return result
-            except (ValueError, TypeError) as e:
-                _LOGGER.info(f"Failed last resort hex conversion: {e}")
-                pass
-                
-        # If all else fails, return 0
-        _LOGGER.error(f"Failed to convert temperature value: {value}")
-        return 0
+        return int(value[:2], 16) / divisor
 
     def set_temperature(self, temperature: float, **kwargs):
         _LOGGER.info("Temp change to " + str(temperature) + " requested.")
@@ -472,16 +388,11 @@ class DaikinClimate(ClimateEntity):
 
     def update(self):
         """Fetch new state data for the entity."""
-        # Use the exact same structure as the test code
-        # Add a specific request for outside temperature sensor data
         payload = {
             "requests": [
                 {"op": 2, "to": "/dsiot/edge/adr_0100.dgc_status?filter=pv,pt,md"},
                 {"op": 2, "to": "/dsiot/edge/adr_0200.dgc_status?filter=pv,pt,md"},
-                {"op": 2, "to": "/dsiot/edge/adr_0100.i_power.week_power?filter=pv,pt,md"},
-                {"op": 2, "to": "/dsiot/edge.adp_i"},
-                # Add specific request for outside temperature sensor
-                {"op": 2, "to": "/dsiot/edge/adr_0200.sensor?filter=pv,pt,md"}
+                {"op": 2, "to": "/dsiot/edge/adr_0100.i_power.week_power?filter=pv,pt,md"}
             ]
         }
 
@@ -489,189 +400,39 @@ class DaikinClimate(ClimateEntity):
             response = requests.post(self.url, json=payload)
             response.raise_for_status()
             data = response.json()
-            
-            # Enhanced debugging to understand the API response structure
-            _LOGGER.info("Full API response: %s", data)
-            
-            # Specifically log the structure of the second request which should contain outside temperature
-            for resp in data.get('responses', []):
-                if resp.get('fr') == '/dsiot/edge/adr_0200.dgc_status':
-                    _LOGGER.info("Found adr_0200 response: %s", resp)
-                    # Explore the structure to find potential paths to outside temperature
-                    if 'pc' in resp:
-                        _LOGGER.info("PC structure: %s", resp['pc'])
-                elif resp.get('fr') == '/dsiot/edge/adr_0200.sensor':
-                    _LOGGER.info("Found sensor response: %s", resp)
-                    if 'pc' in resp:
-                        _LOGGER.info("Sensor PC structure: %s", resp['pc'])
+            _LOGGER.debug(data)
 
-            # Set the HVAC mode
-            try:
-                is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
-                self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
-            except Exception as e:
-                _LOGGER.warning(f"Error setting HVAC mode: {e}")
+            # Set the HVAC mode.
+            is_off = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01") == "00"
+            self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP[self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')]
 
-            # For outside temperature - try multiple possible paths
-            outside_temp_found = False
-            
-            # List of possible paths to try for outside temperature
-            outside_temp_paths = [
-                # Original path
-                ['/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'],
-                # Alternative paths to try
-                ['/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1002', 'e_A00D', 'p_01'],
-                ['/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1002', 'e_A002', 'p_01'],
-                ['/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'],
-                ['/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00D', 'p_01']
-            ]
-            
-            # First try the standard paths
-            for path in outside_temp_paths:
-                try:
-                    _LOGGER.info(f"Trying outside temperature path: {path}")
-                    outside_temp_hex = self.find_value_by_pn(data, *path)
-                    _LOGGER.info(f"Found outside temperature hex value: {outside_temp_hex}")
-                    self._outside_temperature = self.hex_to_temp(outside_temp_hex)
-                    _LOGGER.info(f"Successfully read outside temperature: {self._outside_temperature}°C from hex value {outside_temp_hex} using path {path}")
-                    outside_temp_found = True
-                    break
-                except Exception as e:
-                    _LOGGER.debug(f"Failed to read outside temperature with path {path}: {e}")
-            
-            # If not found, try the dedicated sensor endpoint we added
-            if not outside_temp_found:
-                try:
-                    _LOGGER.info("Trying to read outside temperature from dedicated sensor endpoint")
-                    # Try different possible paths in the sensor endpoint
-                    sensor_paths = [
-                        ['/dsiot/edge/adr_0200.sensor', 'sensor', 'temperature', 'outside'],
-                        ['/dsiot/edge/adr_0200.sensor', 'sensor', 'outside_temp'],
-                        ['/dsiot/edge/adr_0200.sensor', 'sensor', 'temp_outside']
-                    ]
-                    
-                    for sensor_path in sensor_paths:
-                        try:
-                            _LOGGER.info(f"Trying sensor path: {sensor_path}")
-                            outside_temp_value = self.find_value_by_pn(data, *sensor_path)
-                            _LOGGER.info(f"Found outside temperature value from sensor: {outside_temp_value} (type: {type(outside_temp_value)})")
-                            
-                            # Check if the value is already a number or needs conversion
-                            if isinstance(outside_temp_value, (int, float)):
-                                self._outside_temperature = float(outside_temp_value)
-                                _LOGGER.info(f"Converted direct numeric value to: {self._outside_temperature}")
-                            else:
-                                # Try to convert from hex if it's a string
-                                old_value = self._outside_temperature
-                                self._outside_temperature = self.hex_to_temp(outside_temp_value)
-                                _LOGGER.info(f"Converted from hex/string: {outside_temp_value} -> {self._outside_temperature} (was: {old_value})")
-                            
-                            _LOGGER.info(f"Successfully read outside temperature from sensor endpoint: {self._outside_temperature}°C using path {sensor_path}")
-                            outside_temp_found = True
-                            break
-                        except Exception as e:
-                            _LOGGER.debug(f"Failed to read outside temperature from sensor path {sensor_path}: {e}")
-                except Exception as e:
-                    _LOGGER.debug(f"Failed to read from sensor endpoint: {e}")
-            
-            if not outside_temp_found:
-                _LOGGER.error("Could not find outside temperature in any of the expected paths")
-                if self._outside_temperature is None:
-                    self._outside_temperature = 0
+            self._outside_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'))
 
-            # Get target temperature
-            try:
-                name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
-                if name is not None:
-                    self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
-                else:
-                    self._target_temperature = None
-            except Exception as e:
-                _LOGGER.warning(f"Error setting target temperature: {e}")
+            # Only set the target temperature if this mode allows it. Otherwise, it should be set to none.
+            name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
+            if name is not None:
+                self._target_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name))
+            else:
+                self._target_temperature = None
             
-            # Get current temperature
-            try:
-                self._current_temperature = self.hex_to_temp(
-                    self.find_value_by_pn(
-                        data,
-                        '/dsiot/edge/adr_0100.dgc_status',
-                        'dgc_status',
-                        'e_1002',
-                        'e_A00B',
-                        'p_01'
-                    ),
-                    divisor=1
-                )
-            except Exception as e:
-                _LOGGER.warning(f"Error reading current temperature: {e}")
-                if self._current_temperature is None:
-                    self._current_temperature = 0
+            # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
+            # for this temperature is limited to integers. So the passed divisor is 1.
+            self._current_temperature = self.hex_to_temp(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'), divisor=1)
 
-            # Get fan mode
-            try:
-                fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
-                if fan_mode_key_name is not None:
-                    self._fan_mode = REVERSE_FAN_MODE_MAP[self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[self.hvac_mode])]
-                else:
-                    self._fan_mode = HAFanMode.FAN_AUTO
-            except Exception as e:
-                _LOGGER.warning(f"Error reading fan mode: {e}")
+            # If we cannot find a name for this hvac_mode's fan speed, it is automatic. This is the case for dry.
+            fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
+            if fan_mode_key_name is not None:
+                self._fan_mode = REVERSE_FAN_MODE_MAP[self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[self.hvac_mode])]
+            else:
+                self._fan_mode = HAFanMode.FAN_AUTO
 
-            # Get humidity
-            try:
-                self._current_humidity = int(
-                    self.find_value_by_pn(
-                        data,
-                        '/dsiot/edge/adr_0100.dgc_status',
-                        'dgc_status',
-                        'e_1002',
-                        'e_A00B',
-                        'p_02'
-                    ),
-                    16
-                )
-            except Exception as e:
-                _LOGGER.warning(f"Error reading humidity: {e}")
-                if self._current_humidity is None:
-                    self._current_humidity = 0
+            self._current_humidity = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_02'), 16)
 
-            # Get swing mode
-            try:
-                if not self.hvac_mode == HVACMode.OFF:
-                    self._swing_mode = self.get_swing_state(data)
-            except Exception as e:
-                _LOGGER.warning(f"Error reading swing mode: {e}")
+            if not self.hvac_mode == HVACMode.OFF:
+                self._swing_mode = self.get_swing_state(data)
             
-            # For energy today:
-            try:
-                energy_data = self.find_value_by_pn(
-                    data,
-                    '/dsiot/edge/adr_0100.i_power.week_power',
-                    'week_power',
-                    'datas'
-                )
-                if isinstance(energy_data, list) and len(energy_data) > 0:
-                    self._energy_today = int(energy_data[-1])
-                    _LOGGER.info(f"Successfully read energy today: {self._energy_today}")
-            except Exception as e:
-                _LOGGER.error(f"Error reading energy today: {e}")
-                if self._energy_today is None:
-                    self._energy_today = 0
-            
-            # For runtime today:
-            try:
-                runtime = self.find_value_by_pn(
-                    data,
-                    '/dsiot/edge/adr_0100.i_power.week_power',
-                    'week_power',
-                    'today_runtime'
-                )
-                self._runtime_today = int(runtime)
-                _LOGGER.info(f"Successfully read runtime today: {self._runtime_today} minutes")
-            except Exception as e:
-                _LOGGER.error(f"Error reading runtime today: {e}")
-                if self._runtime_today is None:
-                    self._runtime_today = 0
+            self._energy_today = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')[-1])
+            self._runtime_today = int(self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime'))
             
         except Exception as e:
             _LOGGER.error(f"Error updating Daikin AC: {e}")
