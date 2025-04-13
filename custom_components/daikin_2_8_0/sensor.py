@@ -29,7 +29,7 @@ _LOGGER = logging.getLogger(__name__)
 
 SENSOR_TYPES = {
     "temperature": {
-        "name": "Temperature",
+        "name": "Inside Temperature",
         "key": "current_temperature",
         "icon": "mdi:thermometer",
         "device_class": SensorDeviceClass.TEMPERATURE,
