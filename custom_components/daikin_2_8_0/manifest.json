@@ -9,5 +9,5 @@
     "iot_class": "local_polling",
     "version": "1.0.2",
     "config_flow": true,
-    "icon": "icons/daikin.svg"
+    "icon": "https://brands.home-assistant.io/daikin/icon.png"
   }
