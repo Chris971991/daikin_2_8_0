@@ -319,25 +319,92 @@ class DaikinClimate(ClimateEntity):
 
     @staticmethod
     def find_value_by_pn(data:dict, fr: str, *keys):
-        data = [ x['pc'] for x in data['responses'] if x['fr'] == fr ]
-
+        """Find a value in the nested response data structure.
+        
+        Args:
+            data: The response data
+            fr: The response path to look for
+            *keys: The sequence of keys to navigate through
+            
+        Returns:
+            The value found at the specified path
+            
+        Raises:
+            Exception: If the path is not found
+        """
+        # First, find the response with the matching 'fr' value
+        matching_responses = [x for x in data.get('responses', []) if x.get('fr') == fr]
+        
+        if not matching_responses:
+            available_responses = [x.get('fr') for x in data.get('responses', [])]
+            raise Exception(f'Response path {fr} not found. Available paths: {available_responses}')
+        
+        # Extract the 'pc' field from the matching response
+        data = [x.get('pc', {}) for x in matching_responses]
+        
+        # Log the initial data structure for debugging
+        _LOGGER.debug(f"Initial data structure for path {fr}: {data}")
+        
+        # Navigate through the keys
         while keys:
             current_key = keys[0]
             keys = keys[1:]
             found = False
+            
             for pcs in data:
-                if pcs['pn'] == current_key:
+                if pcs.get('pn') == current_key:
                     if not keys:
-                        return pcs['pv']
-                    data = pcs['pch']
-                    found = True
-                    break
+                        if 'pv' in pcs:
+                            return pcs['pv']
+                        else:
+                            raise Exception(f'Value not found for key {current_key}')
+                    
+                    if 'pch' in pcs:
+                        data = pcs['pch']
+                        found = True
+                        break
+                    else:
+                        raise Exception(f'No children found for key {current_key}')
+            
             if not found:
-                raise Exception(f'Key {current_key} not found')
+                available_keys = [pcs.get('pn') for pcs in data if 'pn' in pcs]
+                raise Exception(f'Key {current_key} not found. Available keys: {available_keys}')
 
     @staticmethod
     def hex_to_temp(value: str, divisor=2) -> float:
-        return int(value[:2], 16) / divisor
+        """Convert temperature value to float.
+        
+        For values that look like hex codes (e.g., '1400'), convert from hex.
+        For values that look like direct numbers (e.g., '12.5'), convert directly.
+        """
+        # First check if it's a direct numeric value with a decimal point
+        if isinstance(value, str) and '.' in value:
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                pass
+                
+        # Check if it's a typical hex temperature code (4 chars, no decimal)
+        if isinstance(value, str) and len(value) == 4 and all(c in '0123456789ABCDEFabcdef' for c in value):
+            try:
+                return int(value[:2], 16) / divisor
+            except (ValueError, TypeError):
+                pass
+        
+        # For any other format, try direct conversion first
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            # If that fails, try hex as a last resort
+            try:
+                if isinstance(value, str) and len(value) >= 2:
+                    return int(value[:2], 16) / divisor
+            except (ValueError, TypeError):
+                pass
+                
+        # If all else fails, return 0
+        _LOGGER.error(f"Failed to convert temperature value: {value}")
+        return 0
 
     def set_temperature(self, temperature: float, **kwargs):
         _LOGGER.info("Temp change to " + str(temperature) + " requested.")
@@ -389,12 +456,15 @@ class DaikinClimate(ClimateEntity):
     def update(self):
         """Fetch new state data for the entity."""
         # Use the exact same structure as the test code
+        # Add a specific request for outside temperature sensor data
         payload = {
             "requests": [
                 {"op": 2, "to": "/dsiot/edge/adr_0100.dgc_status?filter=pv,pt,md"},
                 {"op": 2, "to": "/dsiot/edge/adr_0200.dgc_status?filter=pv,pt,md"},
                 {"op": 2, "to": "/dsiot/edge/adr_0100.i_power.week_power?filter=pv,pt,md"},
-                {"op": 2, "to": "/dsiot/edge.adp_i"}
+                {"op": 2, "to": "/dsiot/edge.adp_i"},
+                # Add specific request for outside temperature sensor
+                {"op": 2, "to": "/dsiot/edge/adr_0200.sensor?filter=pv,pt,md"}
             ]
         }
 
@@ -402,7 +472,17 @@ class DaikinClimate(ClimateEntity):
             response = requests.post(self.url, json=payload)
             response.raise_for_status()
             data = response.json()
-            _LOGGER.debug(data)
+            
+            # Enhanced debugging to understand the API response structure
+            _LOGGER.debug("Full API response: %s", data)
+            
+            # Specifically log the structure of the second request which should contain outside temperature
+            for resp in data.get('responses', []):
+                if resp.get('fr') == '/dsiot/edge/adr_0200.dgc_status':
+                    _LOGGER.info("Found adr_0200 response: %s", resp)
+                    # Explore the structure to find potential paths to outside temperature
+                    if 'pc' in resp:
+                        _LOGGER.info("PC structure: %s", resp['pc'])
 
             # Set the HVAC mode
             try:
@@ -411,20 +491,63 @@ class DaikinClimate(ClimateEntity):
             except Exception as e:
                 _LOGGER.warning(f"Error setting HVAC mode: {e}")
 
-            # For outside temperature:
-            try:
-                outside_temp_hex = self.find_value_by_pn(
-                    data,
-                    '/dsiot/edge/adr_0200.dgc_status',
-                    'dgc_status',
-                    'e_1003',
-                    'e_A00D',
-                    'p_01'
-                )
-                self._outside_temperature = self.hex_to_temp(outside_temp_hex)
-                _LOGGER.info(f"Successfully read outside temperature: {self._outside_temperature}°C from hex value {outside_temp_hex}")
-            except Exception as e:
-                _LOGGER.error(f"Error reading outside temperature: {e}")
+            # For outside temperature - try multiple possible paths
+            outside_temp_found = False
+            
+            # List of possible paths to try for outside temperature
+            outside_temp_paths = [
+                # Original path
+                ['/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01'],
+                # Alternative paths to try
+                ['/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1002', 'e_A00D', 'p_01'],
+                ['/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1002', 'e_A002', 'p_01'],
+                ['/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1002', 'e_A00B', 'p_01'],
+                ['/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_A00D', 'p_01']
+            ]
+            
+            # First try the standard paths
+            for path in outside_temp_paths:
+                try:
+                    _LOGGER.debug(f"Trying outside temperature path: {path}")
+                    outside_temp_hex = self.find_value_by_pn(data, *path)
+                    self._outside_temperature = self.hex_to_temp(outside_temp_hex)
+                    _LOGGER.info(f"Successfully read outside temperature: {self._outside_temperature}°C from hex value {outside_temp_hex} using path {path}")
+                    outside_temp_found = True
+                    break
+                except Exception as e:
+                    _LOGGER.debug(f"Failed to read outside temperature with path {path}: {e}")
+            
+            # If not found, try the dedicated sensor endpoint we added
+            if not outside_temp_found:
+                try:
+                    _LOGGER.info("Trying to read outside temperature from dedicated sensor endpoint")
+                    # Try different possible paths in the sensor endpoint
+                    sensor_paths = [
+                        ['/dsiot/edge/adr_0200.sensor', 'sensor', 'temperature', 'outside'],
+                        ['/dsiot/edge/adr_0200.sensor', 'sensor', 'outside_temp'],
+                        ['/dsiot/edge/adr_0200.sensor', 'sensor', 'temp_outside']
+                    ]
+                    
+                    for sensor_path in sensor_paths:
+                        try:
+                            outside_temp_value = self.find_value_by_pn(data, *sensor_path)
+                            # Check if the value is already a number or needs conversion
+                            if isinstance(outside_temp_value, (int, float)):
+                                self._outside_temperature = float(outside_temp_value)
+                            else:
+                                # Try to convert from hex if it's a string
+                                self._outside_temperature = self.hex_to_temp(outside_temp_value)
+                            
+                            _LOGGER.info(f"Successfully read outside temperature from sensor endpoint: {self._outside_temperature}°C using path {sensor_path}")
+                            outside_temp_found = True
+                            break
+                        except Exception as e:
+                            _LOGGER.debug(f"Failed to read outside temperature from sensor path {sensor_path}: {e}")
+                except Exception as e:
+                    _LOGGER.debug(f"Failed to read from sensor endpoint: {e}")
+            
+            if not outside_temp_found:
+                _LOGGER.error("Could not find outside temperature in any of the expected paths")
                 if self._outside_temperature is None:
                     self._outside_temperature = 0
 
