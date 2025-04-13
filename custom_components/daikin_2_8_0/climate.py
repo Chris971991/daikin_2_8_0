@@ -329,28 +329,62 @@ class DaikinClimate(ClimateEntity):
     @staticmethod
     def find_value_by_pn(data:dict, fr: str, *keys):
         try:
-            # Use get() to safely check for 'fr' key
-            data = [ x['pc'] for x in data['responses'] if x.get('fr') == fr ]
+            # Add detailed logging
+            _LOGGER.debug(f"Finding value for path: {fr} -> {' -> '.join(keys)}")
+            
+            # Check if 'responses' exists in data
+            if 'responses' not in data:
+                _LOGGER.debug("No 'responses' key in data")
+                return None
+                
+            # Find the response with matching 'fr'
+            matching_responses = [x for x in data['responses'] if x.get('fr') == fr]
+            if not matching_responses:
+                _LOGGER.debug(f"No response with fr={fr} found")
+                return None
+                
+            # Get the 'pc' from the first matching response
+            data = matching_responses[0].get('pc')
             if not data:
-                return None  # Return None if no matching 'fr' found
-
-            while keys:
-                current_key = keys[0]
-                keys = keys[1:]
+                _LOGGER.debug(f"No 'pc' in response with fr={fr}")
+                return None
+                
+            # Now traverse through the keys
+            for i, current_key in enumerate(keys):
+                _LOGGER.debug(f"Looking for key {current_key} (step {i+1}/{len(keys)})")
+                
+                # If we're at a leaf node (no 'pch')
+                if 'pch' not in data:
+                    if data.get('pn') == current_key:
+                        _LOGGER.debug(f"Found value at leaf node: {data.get('pv')}")
+                        return data.get('pv')
+                    else:
+                        _LOGGER.debug(f"Key {current_key} not found at leaf node")
+                        return None
+                
+                # Look for the key in the children
                 found = False
-                for pcs in data:
-                    if pcs['pn'] == current_key:
-                        if not keys:
-                            return pcs['pv']
-                        data = pcs['pch']
+                for child in data.get('pch', []):
+                    if child.get('pn') == current_key:
+                        # If this is the last key, return the value
+                        if i == len(keys) - 1:
+                            _LOGGER.debug(f"Found final value: {child.get('pv')}")
+                            return child.get('pv')
+                        # Otherwise, continue traversing
+                        data = child
                         found = True
                         break
+                
                 if not found:
-                    return None  # Return None instead of raising an exception
-            return None  # Return None if we run out of keys
+                    _LOGGER.debug(f"Key {current_key} not found in children")
+                    return None
+            
+            _LOGGER.debug("Reached end of keys without finding value")
+            return None
+            
         except Exception as e:
             _LOGGER.debug(f"Error in find_value_by_pn: {e}")
-            return None  # Return None for any exception
+            return None
 
     @staticmethod
     def hex_to_temp(value: str, divisor=2) -> Optional[float]:
@@ -416,6 +450,58 @@ class DaikinClimate(ClimateEntity):
             return SWING_VERTICAL
         
         return SWING_OFF
+        
+    def _extract_outside_temperature(self, data: dict) -> Optional[float]:
+        """Extract the outside temperature from the API response.
+        
+        Tries multiple paths to find the outside temperature.
+        """
+        _LOGGER.debug("Attempting to find outside temperature")
+        
+        # Try the primary path
+        outside_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01')
+        _LOGGER.debug(f"Primary path outside temperature hex value: {outside_temp_hex}")
+        
+        # If primary path fails, try alternative paths
+        if outside_temp_hex is None:
+            # Try direct access to e_A00D
+            _LOGGER.debug("Trying alternative path for outside temperature")
+            outside_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_A00D', 'p_01')
+            _LOGGER.debug(f"Alternative path outside temperature hex value: {outside_temp_hex}")
+            
+            # If that fails too, try looking at the raw response
+            if outside_temp_hex is None and 'responses' in data:
+                _LOGGER.debug("Trying to find e_A00D in raw response")
+                for response in data['responses']:
+                    if response.get('fr') == '/dsiot/edge/adr_0200.dgc_status':
+                        _LOGGER.debug("Found adr_0200 response, dumping structure for debugging")
+                        _LOGGER.debug(f"Response structure: {response}")
+                        
+                        # Try to find e_A00D directly in the response
+                        try:
+                            pc = response.get('pc', {})
+                            pch = pc.get('pch', [])
+                            for item in pch:
+                                if item.get('pn') == 'e_1003':
+                                    e_1003 = item
+                                    for sub_item in e_1003.get('pch', []):
+                                        if sub_item.get('pn') == 'e_A00D':
+                                            e_A00D = sub_item
+                                            for p_item in e_A00D.get('pch', []):
+                                                if p_item.get('pn') == 'p_01':
+                                                    outside_temp_hex = p_item.get('pv')
+                                                    _LOGGER.debug(f"Found outside temp in raw response: {outside_temp_hex}")
+                                                    break
+                        except Exception as e:
+                            _LOGGER.debug(f"Error parsing raw response: {e}")
+        
+        if outside_temp_hex is not None:
+            temp = self.hex_to_temp(outside_temp_hex)
+            _LOGGER.debug(f"Converted outside temperature: {temp}")
+            return temp
+        else:
+            _LOGGER.debug("Outside temperature not available")
+            return None
 
     def update(self):
         """Fetch new state data for the entity."""
@@ -439,12 +525,8 @@ class DaikinClimate(ClimateEntity):
             
             mode_value = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_01')
             self._hvac_mode = HVACMode.OFF if is_off else MODE_MAP.get(mode_value, HVACMode.OFF)
-            # Handle the case where outside temperature data might not be available
-            outside_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0200.dgc_status', 'dgc_status', 'e_1003', 'e_A00D', 'p_01')
-            if outside_temp_hex is not None:
-                self._outside_temperature = self.hex_to_temp(outside_temp_hex)
-            else:
-                self._outside_temperature = None
+            # Get the outside temperature
+            self._outside_temperature = self._extract_outside_temperature(data)
 
             # Only set the target temperature if this mode allows it. Otherwise, it should be set to none.
             name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
