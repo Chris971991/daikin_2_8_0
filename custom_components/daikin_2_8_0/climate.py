@@ -579,20 +579,35 @@ class DaikinClimate(ClimateEntity):
             if not self.hvac_mode == HVACMode.OFF:
                 self._swing_mode = self.get_swing_state(data)
             
-            energy_data = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')
-            if energy_data is not None and isinstance(energy_data, list) and len(energy_data) > 0:
-                self._energy_today = int(energy_data[-1])
-            else:
-                self._energy_today = 0
+            try:
+                # Get the energy data
+                energy_data = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'datas')
                 
-            runtime_data = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
-            if runtime_data is not None:
-                try:
-                    self._runtime_today = int(runtime_data)
-                except (ValueError, TypeError):
-                    _LOGGER.warning(f"Could not convert runtime data to int: {runtime_data}")
+                # Handle different types of energy data
+                if energy_data is not None:
+                    if isinstance(energy_data, list) and len(energy_data) > 0:
+                        self._energy_today = int(energy_data[-1])
+                    elif isinstance(energy_data, (int, float)):
+                        self._energy_today = int(energy_data)
+                    else:
+                        _LOGGER.warning(f"Unexpected energy data type: {type(energy_data)}")
+                        self._energy_today = 0
+                else:
+                    self._energy_today = 0
+                    
+                # Get the runtime data
+                runtime_data = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.i_power.week_power', 'week_power', 'today_runtime')
+                if runtime_data is not None:
+                    try:
+                        self._runtime_today = int(runtime_data)
+                    except (ValueError, TypeError):
+                        _LOGGER.warning(f"Could not convert runtime data to int: {runtime_data}")
+                        self._runtime_today = 0
+                else:
                     self._runtime_today = 0
-            else:
+            except Exception as e:
+                _LOGGER.error(f"Error processing energy/runtime data: {e}")
+                self._energy_today = 0
                 self._runtime_today = 0
             
         except Exception as e:
