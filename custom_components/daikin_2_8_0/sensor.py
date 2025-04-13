@@ -169,12 +169,34 @@ class DaikinSensor(SensorEntity):
     @property
     def available(self) -> bool:
         """Return if entity is available."""
-        return hasattr(self._climate, self._key)
+        # Check if the attribute exists directly or with a leading underscore
+        direct_attr = hasattr(self._climate, self._key)
+        underscore_attr = not self._key.startswith('_') and hasattr(self._climate, f"_{self._key}")
+        
+        # Also check if the value is not None
+        if direct_attr:
+            direct_value = getattr(self._climate, self._key, None) is not None
+        else:
+            direct_value = False
+            
+        if underscore_attr:
+            underscore_value = getattr(self._climate, f"_{self._key}", None) is not None
+        else:
+            underscore_value = False
+            
+        return (direct_attr and direct_value) or (underscore_attr and underscore_value)
 
     @property
     def native_value(self) -> Any:
         """Return the state of the sensor."""
-        return getattr(self._climate, self._key, None)
+        # First try to access the attribute directly
+        value = getattr(self._climate, self._key, None)
+        
+        # If that fails, try with a leading underscore
+        if value is None and not self._key.startswith('_'):
+            value = getattr(self._climate, f"_{self._key}", None)
+            
+        return value
 
     async def async_update(self) -> None:
         """Get the latest data from the sensor."""
