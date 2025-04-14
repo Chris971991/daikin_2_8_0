@@ -362,6 +362,27 @@ class DaikinClimate(ClimateEntity):
             # Skip the first key (usually 'dgc_status' or 'week_power') since it's the value of pc['pn']
             if len(keys) > 0 and pc.get('pn') == keys[0]:
                 keys = keys[1:]
+            # Special case for target temperature in e_3001
+            if 'e_3001' in keys and keys[-1] in ['p_02', 'p_03', 'p_1D']:
+                target_param = keys[-1]
+                _LOGGER.debug(f"Looking for target temperature parameter: {target_param}")
+                
+                # First try to find e_1002
+                for item in pc.get('pch', []):
+                    if item.get('pn') == 'e_1002':
+                        # Then find e_3001
+                        for sub_item in item.get('pch', []):
+                            if sub_item.get('pn') == 'e_3001':
+                                # Then find the target parameter
+                                for p_item in sub_item.get('pch', []):
+                                    if p_item.get('pn') == target_param:
+                                        _LOGGER.debug(f"Found target temperature: {p_item.get('pv')}")
+                                        return p_item.get('pv')
+                
+                # If we couldn't find it, log it
+                _LOGGER.debug(f"Could not find target temperature for parameter {target_param}")
+                return None
+            
             
             # Special case for outside temperature
             if 'e_A00D' in keys and 'p_01' in keys and keys[-1] == 'p_01':
@@ -449,8 +470,19 @@ class DaikinClimate(ClimateEntity):
 
         temperature_hex = format(int(temperature * 2), '02x')
         _LOGGER.debug(f"Setting temperature to {temperature} (hex: {temperature_hex}) using attribute {attr_name}")
+        
+        # Create the attribute for setting the temperature
         temp_attr = DaikinAttribute(attr_name, temperature_hex, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-        self.update_attribute(DaikinRequest([temp_attr]).serialize())
+        
+        # Log the request for debugging
+        request = DaikinRequest([temp_attr]).serialize()
+        _LOGGER.debug(f"Temperature set request: {request}")
+        
+        # Send the request to the device
+        self.update_attribute(request)
+        
+        # Update the target temperature property directly
+        self._target_temperature = temperature
 
     def update_attribute(self, request: dict, *keys) -> None:
         _LOGGER.info(request)
@@ -549,21 +581,44 @@ class DaikinClimate(ClimateEntity):
 
             # Only set the target temperature if this mode allows it. Otherwise, it should be set to none.
             name = HVAC_TO_TEMP_HEX.get(self._hvac_mode)
+            _LOGGER.debug(f"HVAC mode: {self._hvac_mode}, Temperature parameter: {name}")
+            
             if name is not None:
                 # First try the original path
                 target_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', name)
+                _LOGGER.debug(f"First attempt to find target temperature: {target_temp_hex}")
                 
                 # If not found, try directly in e_3001 (based on debug logs)
                 if target_temp_hex is None:
                     # For COOL mode, look for p_02
                     if self._hvac_mode == HVACMode.COOL:
+                        _LOGGER.debug("Trying to find COOL mode target temperature")
                         target_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_02')
                     # For HEAT mode, look for p_03
                     elif self._hvac_mode == HVACMode.HEAT:
+                        _LOGGER.debug("Trying to find HEAT mode target temperature")
                         target_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_03')
                     # For AUTO mode, look for p_1D
                     elif self._hvac_mode == HVACMode.AUTO:
+                        _LOGGER.debug("Trying to find AUTO mode target temperature")
                         target_temp_hex = self.find_value_by_pn(data, '/dsiot/edge/adr_0100.dgc_status', 'dgc_status', 'e_1002', 'e_3001', 'p_1D')
+                    
+                    _LOGGER.debug(f"Second attempt to find target temperature: {target_temp_hex}")
+                
+                # Try a direct approach by looking at all parameters in e_3001
+                if target_temp_hex is None:
+                    _LOGGER.debug("Trying direct approach to find target temperature")
+                    # Manually search for e_3001 parameters
+                    for item in data.get('responses', []):
+                        if item.get('fr') == '/dsiot/edge/adr_0100.dgc_status':
+                            pc = item.get('pc', {})
+                            for root_item in pc.get('pch', []):
+                                if root_item.get('pn') == 'e_1002':
+                                    for sub_item in root_item.get('pch', []):
+                                        if sub_item.get('pn') == 'e_3001':
+                                            _LOGGER.debug(f"Found e_3001 node: {sub_item}")
+                                            for p_item in sub_item.get('pch', []):
+                                                _LOGGER.debug(f"e_3001 parameter: {p_item.get('pn')} = {p_item.get('pv')}")
                 
                 if target_temp_hex is not None:
                     _LOGGER.debug(f"Found target temperature: {target_temp_hex}")
@@ -576,10 +631,13 @@ class DaikinClimate(ClimateEntity):
                             self._target_temperature = int(target_temp_hex) / 2
                         except ValueError:
                             self._target_temperature = self.hex_to_temp(target_temp_hex)
+                    
+                    _LOGGER.debug(f"Set target temperature to: {self._target_temperature}")
                 else:
                     _LOGGER.debug(f"Could not find target temperature for mode {self._hvac_mode}")
                     self._target_temperature = None
             else:
+                _LOGGER.debug(f"No temperature parameter for mode {self._hvac_mode}")
                 self._target_temperature = None
             
             # For some reason, this hex value does not get the 'divide by 2' treatment. My only assumption as to why this might be is because the level of granularity
