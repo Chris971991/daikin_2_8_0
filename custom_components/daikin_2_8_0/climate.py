@@ -43,6 +43,7 @@ class HAFanMode(StrEnum):
 TURN_OFF_SWING_AXIS = "000000"
 TURN_ON_SWING_AXIS = "0F0000"
 
+# Fan mode values for e_3001
 FAN_MODE_MAP = {
     HAFanMode.FAN_AUTO : "0A00",
     HAFanMode.FAN_QUIET : "0B00",
@@ -53,17 +54,28 @@ FAN_MODE_MAP = {
     HAFanMode.FAN_LEVEL5 : "0700"
 }
 
+# Fan mode values for e_3003 (p_2A)
+FAN_MODE_MAP_E3003 = {
+    HAFanMode.FAN_AUTO : "00",
+    HAFanMode.FAN_QUIET : "0B",
+    HAFanMode.FAN_LEVEL1 : "03",
+    HAFanMode.FAN_LEVEL2 : "04",
+    HAFanMode.FAN_LEVEL3 : "05",
+    HAFanMode.FAN_LEVEL4 : "06",
+    HAFanMode.FAN_LEVEL5 : "07"
+}
+
 # Vertical, horizontal
 HVAC_MODE_TO_SWING_ATTR_NAMES = {
-    HVACMode.AUTO : ("p_20", "p_21"),
+    HVACMode.AUTO : ("p_05", "p_06"),  # Changed from p_20/p_21 to p_05/p_06 based on your device's response
     HVACMode.COOL : ("p_05", "p_06"),
     HVACMode.HEAT : ("p_07", "p_08"),
-    HVACMode.FAN_ONLY : ("p_24", "p_25"),
-    HVACMode.DRY : ("p_22", "p_23")
+    HVACMode.FAN_ONLY : ("p_05", "p_06"),  # Changed from p_24/p_25 to p_05/p_06
+    HVACMode.DRY : ("p_05", "p_06")  # Changed from p_22/p_23 to p_05/p_06
 }
 
 HVAC_MODE_TO_FAN_SPEED_ATTR_NAME = {
-    HVACMode.AUTO : "p_26",
+    HVACMode.AUTO : "p_2A",  # Changed from p_26 to p_2A based on your device's response
     HVACMode.COOL : "p_09",
     HVACMode.HEAT : "p_0A",
     HVACMode.FAN_ONLY : "p_28",
@@ -246,30 +258,74 @@ class DaikinClimate(ClimateEntity):
         return self._swing_mode
 
     def set_fan_mode(self, fan_mode: str):
-        mode = FAN_MODE_MAP[fan_mode]
         name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
 
         # If in dry mode for example, you cannot set the fan speed. So we ignore anything we cant find in this map.
         if name is not None:
-            mode_attr = DaikinAttribute(name, mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-            self.update_attribute(DaikinRequest([mode_attr]).serialize())
+            # Try both e_3001 and e_3003 paths
+            attributes = []
+            
+            # For e_3001, use the standard fan mode map
+            if name in ["p_09", "p_0A", "p_28"]:  # These are in e_3001
+                mode = FAN_MODE_MAP[fan_mode]
+                attributes.append(DaikinAttribute(name, mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"))
+            
+            # For e_3003 (p_2A), use the e_3003 specific map
+            if name == "p_2A":  # This is in e_3003
+                mode_e3003 = FAN_MODE_MAP_E3003[fan_mode]
+                attributes.append(DaikinAttribute(name, mode_e3003, ["e_1002", "e_3003"], "/dsiot/edge/adr_0100.dgc_status"))
+            
+            # If we're not sure, try both formats
+            if not attributes:
+                mode = FAN_MODE_MAP[fan_mode]
+                mode_e3003 = FAN_MODE_MAP_E3003[fan_mode]
+                attributes.append(DaikinAttribute(name, mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"))
+                attributes.append(DaikinAttribute(name, mode_e3003, ["e_1002", "e_3003"], "/dsiot/edge/adr_0100.dgc_status"))
+            
+            _LOGGER.debug(f"Setting fan mode to {fan_mode} using attribute {name} with {len(attributes)} attributes")
+            
+            self.update_attribute(DaikinRequest(attributes).serialize())
         else:
             self._fan_mode = HAFanMode.FAN_AUTO
 
     def set_swing_mode(self, swing_mode: str):
         if self.hvac_mode == HVACMode.OFF:
             return
-        vertical_axis_command = TURN_OFF_SWING_AXIS if swing_mode in (SWING_OFF, SWING_HORIZONTAL) else TURN_ON_SWING_AXIS
-        horizontal_axis_command = TURN_OFF_SWING_AXIS if swing_mode in (SWING_OFF, SWING_VERTICAL) else TURN_ON_SWING_AXIS
+            
+        # Determine the commands for vertical and horizontal axes
+        vertical_axis_command = TURN_OFF_SWING_AXIS
+        horizontal_axis_command = TURN_OFF_SWING_AXIS
+        
+        # Set the appropriate commands based on the swing mode
+        if swing_mode == SWING_BOTH:
+            vertical_axis_command = TURN_ON_SWING_AXIS
+            horizontal_axis_command = TURN_ON_SWING_AXIS
+            _LOGGER.debug("Setting BOTH vertical and horizontal swing")
+        elif swing_mode == SWING_VERTICAL:
+            vertical_axis_command = TURN_ON_SWING_AXIS
+            _LOGGER.debug("Setting VERTICAL swing only")
+        elif swing_mode == SWING_HORIZONTAL:
+            horizontal_axis_command = TURN_ON_SWING_AXIS
+            _LOGGER.debug("Setting HORIZONTAL swing only")
+        else:  # SWING_OFF
+            _LOGGER.debug("Turning OFF all swing")
+            
         vertical_attr_name, horizontal_attr_name = HVAC_MODE_TO_SWING_ATTR_NAMES[self.hvac_mode]
-        self.update_attribute(
-            DaikinRequest(
-                [
-                    DaikinAttribute(horizontal_attr_name, horizontal_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"),
-                    DaikinAttribute(vertical_attr_name, vertical_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
-                ]
-            ).serialize()
-        )
+        
+        # Try both e_3001 and e_3003 paths
+        attributes = []
+        
+        # Add attributes for e_3001
+        attributes.append(DaikinAttribute(horizontal_attr_name, horizontal_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"))
+        attributes.append(DaikinAttribute(vertical_attr_name, vertical_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"))
+        
+        # Add attributes for e_3003
+        attributes.append(DaikinAttribute(horizontal_attr_name, horizontal_axis_command, ["e_1002", "e_3003"], "/dsiot/edge/adr_0100.dgc_status"))
+        attributes.append(DaikinAttribute(vertical_attr_name, vertical_axis_command, ["e_1002", "e_3003"], "/dsiot/edge/adr_0100.dgc_status"))
+        
+        _LOGGER.debug(f"Setting swing mode to {swing_mode} with commands: vertical={vertical_axis_command}, horizontal={horizontal_axis_command}")
+        
+        self.update_attribute(DaikinRequest(attributes).serialize())
 
     @property
     def temperature_unit(self):
@@ -506,22 +562,42 @@ class DaikinClimate(ClimateEntity):
         self._update_state(True)
 
     def get_swing_state(self, data: dict) -> str:
-        # The number of zeros in the response seems strange. Don't have time to work out, so this should work
+        # Modified to look in both e_3001 and e_3003 for swing values
         vertical_attr_name, horizontal_attr_name = HVAC_MODE_TO_SWING_ATTR_NAMES[self.hvac_mode]
         
+        # Try to find vertical swing in e_3001 first
         vertical_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", vertical_attr_name)
+        
+        # If not found, try e_3003
+        if vertical_value is None:
+            vertical_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3003", vertical_attr_name)
+        
+        # Check if vertical swing is on (contains 'F')
         vertical = "F" in vertical_value if vertical_value is not None else False
         
+        # Same for horizontal
         horizontal_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", horizontal_attr_name)
+        
+        if horizontal_value is None:
+            horizontal_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3003", horizontal_attr_name)
+        
+        # Check if horizontal swing is on (contains 'F')
         horizontal = "F" in horizontal_value if horizontal_value is not None else False
+        
+        _LOGGER.debug(f"Swing values - vertical: {vertical_value} ({vertical}), horizontal: {horizontal_value} ({horizontal})")
 
+        # Determine the swing mode based on the vertical and horizontal values
         if horizontal and vertical:
+            _LOGGER.debug("Detected BOTH swing mode")
             return SWING_BOTH
         if horizontal:
+            _LOGGER.debug("Detected HORIZONTAL swing mode")
             return SWING_HORIZONTAL
         if vertical:
+            _LOGGER.debug("Detected VERTICAL swing mode")
             return SWING_VERTICAL
         
+        _LOGGER.debug("Detected swing mode OFF")
         return SWING_OFF
         
     def _extract_outside_temperature(self, data: dict) -> Optional[float]:
@@ -651,9 +727,37 @@ class DaikinClimate(ClimateEntity):
             # If we cannot find a name for this hvac_mode's fan speed, it is automatic. This is the case for dry.
             fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
             if fan_mode_key_name is not None:
-                fan_mode_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", HVAC_MODE_TO_FAN_SPEED_ATTR_NAME[self.hvac_mode])
-                if fan_mode_value is not None and fan_mode_value in REVERSE_FAN_MODE_MAP:
-                    self._fan_mode = REVERSE_FAN_MODE_MAP[fan_mode_value]
+                # Try to find in e_3001 first
+                fan_mode_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", fan_mode_key_name)
+                
+                # If not found, try e_3003
+                if fan_mode_value is None:
+                    fan_mode_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3003", fan_mode_key_name)
+                    _LOGGER.debug(f"Looking for fan mode in e_3003: {fan_mode_key_name} = {fan_mode_value}")
+                
+                # For debugging
+                _LOGGER.debug(f"Fan mode value found: {fan_mode_value}")
+                
+                # Map the value to a fan mode
+                if fan_mode_value is not None:
+                    # Try to find in the reverse map first
+                    if fan_mode_value in REVERSE_FAN_MODE_MAP:
+                        self._fan_mode = REVERSE_FAN_MODE_MAP[fan_mode_value]
+                    else:
+                        # Try to interpret the value directly
+                        try:
+                            # Convert to integer and map to a fan mode
+                            fan_level = int(fan_mode_value, 16) if len(fan_mode_value) > 1 else int(fan_mode_value)
+                            if fan_level == 0:
+                                self._fan_mode = HAFanMode.FAN_AUTO
+                            elif fan_level == 11:
+                                self._fan_mode = HAFanMode.FAN_QUIET
+                            elif 1 <= fan_level <= 5:
+                                self._fan_mode = getattr(HAFanMode, f"FAN_LEVEL{fan_level}")
+                            else:
+                                self._fan_mode = HAFanMode.FAN_AUTO
+                        except (ValueError, AttributeError):
+                            self._fan_mode = HAFanMode.FAN_AUTO
                 else:
                     self._fan_mode = HAFanMode.FAN_AUTO
             else:
