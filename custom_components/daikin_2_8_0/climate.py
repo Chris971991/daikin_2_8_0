@@ -75,11 +75,19 @@ HVAC_MODE_TO_SWING_ATTR_NAMES = {
 }
 
 HVAC_MODE_TO_FAN_SPEED_ATTR_NAME = {
-    HVACMode.AUTO : "p_2A",  # Changed from p_26 to p_2A based on your device's response
-    HVACMode.COOL : "p_09",
-    HVACMode.HEAT : "p_0A",
-    HVACMode.FAN_ONLY : "p_28",
+    HVACMode.AUTO : "p_2A",  # This is in e_3003
+    HVACMode.COOL : "p_09",  # This is in e_3001
+    HVACMode.HEAT : "p_0A",  # This is in e_3001
+    HVACMode.FAN_ONLY : "p_28",  # This is in e_3001
     # HVACMode.DRY : "dummy" There is no fan mode for dry. It's always automatic.
+}
+
+# Map to indicate which entity contains each fan speed parameter
+FAN_SPEED_ENTITY_MAP = {
+    "p_2A": "e_3003",  # AUTO mode fan speed is in e_3003
+    "p_09": "e_3001",  # COOL mode fan speed is in e_3001
+    "p_0A": "e_3001",  # HEAT mode fan speed is in e_3001
+    "p_28": "e_3001"   # FAN_ONLY mode fan speed is in e_3001
 }
 
 MODE_MAP = {
@@ -262,27 +270,33 @@ class DaikinClimate(ClimateEntity):
 
         # If in dry mode for example, you cannot set the fan speed. So we ignore anything we cant find in this map.
         if name is not None:
-            # Try both e_3001 and e_3003 paths
             attributes = []
             
-            # For e_3001, use the standard fan mode map
-            if name in ["p_09", "p_0A", "p_28"]:  # These are in e_3001
+            # Get the correct entity for this parameter
+            entity_name = FAN_SPEED_ENTITY_MAP.get(name, "e_3001")
+            
+            # For e_3001 parameters (p_09, p_0A, p_28)
+            if entity_name == "e_3001":
                 mode = FAN_MODE_MAP[fan_mode]
                 attributes.append(DaikinAttribute(name, mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"))
             
-            # For e_3003 (p_2A), use the e_3003 specific map
-            if name == "p_2A":  # This is in e_3003
-                mode_e3003 = FAN_MODE_MAP_E3003[fan_mode]
-                attributes.append(DaikinAttribute(name, mode_e3003, ["e_1002", "e_3003"], "/dsiot/edge/adr_0100.dgc_status"))
+            # For e_3003 parameter (p_2A)
+            elif entity_name == "e_3003":
+                # For p_2A, we need to use single byte values
+                if fan_mode == HAFanMode.FAN_AUTO:
+                    mode_value = "00"
+                elif fan_mode == HAFanMode.FAN_QUIET:
+                    mode_value = "0B"
+                elif fan_mode == HAFanMode.FAN_LEVEL5:
+                    mode_value = "09"  # Based on your device's value
+                else:
+                    # Convert Level 1-4 to values 3-6
+                    level = int(fan_mode[-1])  # Extract the number from "Level X"
+                    mode_value = f"{level + 2:02X}"  # Convert to hex
+                
+                attributes.append(DaikinAttribute(name, mode_value, ["e_1002", "e_3003"], "/dsiot/edge/adr_0100.dgc_status"))
             
-            # If we're not sure, try both formats
-            if not attributes:
-                mode = FAN_MODE_MAP[fan_mode]
-                mode_e3003 = FAN_MODE_MAP_E3003[fan_mode]
-                attributes.append(DaikinAttribute(name, mode, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"))
-                attributes.append(DaikinAttribute(name, mode_e3003, ["e_1002", "e_3003"], "/dsiot/edge/adr_0100.dgc_status"))
-            
-            _LOGGER.debug(f"Setting fan mode to {fan_mode} using attribute {name} with {len(attributes)} attributes")
+            _LOGGER.debug(f"Setting fan mode to {fan_mode} using attribute {name} in {entity_name}")
             
             self.update_attribute(DaikinRequest(attributes).serialize())
         else:
@@ -310,16 +324,23 @@ class DaikinClimate(ClimateEntity):
         else:  # SWING_OFF
             _LOGGER.debug("Turning OFF all swing")
             
+        # Get the swing attribute names for the current HVAC mode
         vertical_attr_name, horizontal_attr_name = HVAC_MODE_TO_SWING_ATTR_NAMES[self.hvac_mode]
         
-        # Try both e_3001 and e_3003 paths
         attributes = []
         
-        # Add attributes for e_3001
+        # Add attributes for e_3001 (primary location based on device logs)
         attributes.append(DaikinAttribute(horizontal_attr_name, horizontal_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"))
         attributes.append(DaikinAttribute(vertical_attr_name, vertical_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"))
         
-        # Add attributes for e_3003
+        # Also try the original p_20/p_21 parameters in e_3001
+        if vertical_attr_name != "p_20":
+            attributes.append(DaikinAttribute("p_20", vertical_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"))
+        
+        if horizontal_attr_name != "p_21":
+            attributes.append(DaikinAttribute("p_21", horizontal_axis_command, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status"))
+        
+        # Add attributes for e_3003 as a fallback
         attributes.append(DaikinAttribute(horizontal_attr_name, horizontal_axis_command, ["e_1002", "e_3003"], "/dsiot/edge/adr_0100.dgc_status"))
         attributes.append(DaikinAttribute(vertical_attr_name, vertical_axis_command, ["e_1002", "e_3003"], "/dsiot/edge/adr_0100.dgc_status"))
         
@@ -562,24 +583,29 @@ class DaikinClimate(ClimateEntity):
         self._update_state(True)
 
     def get_swing_state(self, data: dict) -> str:
-        # Modified to look in both e_3001 and e_3003 for swing values
+        # Get the swing attribute names for the current HVAC mode
         vertical_attr_name, horizontal_attr_name = HVAC_MODE_TO_SWING_ATTR_NAMES[self.hvac_mode]
         
-        # Try to find vertical swing in e_3001 first
+        # First try to find swing values in e_3001
         vertical_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", vertical_attr_name)
+        horizontal_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", horizontal_attr_name)
         
-        # If not found, try e_3003
+        # If not found in e_3001, try e_3003
         if vertical_value is None:
             vertical_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3003", vertical_attr_name)
         
-        # Check if vertical swing is on (contains 'F')
-        vertical = "F" in vertical_value if vertical_value is not None else False
-        
-        # Same for horizontal
-        horizontal_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", horizontal_attr_name)
-        
         if horizontal_value is None:
             horizontal_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3003", horizontal_attr_name)
+        
+        # If still not found, try looking for p_20 and p_21 in e_3001 (original parameters)
+        if vertical_value is None:
+            vertical_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", "p_20")
+        
+        if horizontal_value is None:
+            horizontal_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", "p_21")
+        
+        # Check if vertical swing is on (contains 'F')
+        vertical = "F" in vertical_value if vertical_value is not None else False
         
         # Check if horizontal swing is on (contains 'F')
         horizontal = "F" in horizontal_value if horizontal_value is not None else False
@@ -727,36 +753,71 @@ class DaikinClimate(ClimateEntity):
             # If we cannot find a name for this hvac_mode's fan speed, it is automatic. This is the case for dry.
             fan_mode_key_name = HVAC_MODE_TO_FAN_SPEED_ATTR_NAME.get(self.hvac_mode)
             if fan_mode_key_name is not None:
-                # Try to find in e_3001 first
-                fan_mode_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", fan_mode_key_name)
+                # Get the correct entity for this parameter
+                entity_name = FAN_SPEED_ENTITY_MAP.get(fan_mode_key_name, "e_3001")
                 
-                # If not found, try e_3003
-                if fan_mode_value is None:
+                # Look in the correct entity first
+                fan_mode_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", entity_name, fan_mode_key_name)
+                _LOGGER.debug(f"Looking for fan mode in {entity_name}: {fan_mode_key_name} = {fan_mode_value}")
+                
+                # If not found and we were looking in e_3001, try e_3003
+                if fan_mode_value is None and entity_name == "e_3001":
                     fan_mode_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3003", fan_mode_key_name)
                     _LOGGER.debug(f"Looking for fan mode in e_3003: {fan_mode_key_name} = {fan_mode_value}")
+                
+                # If not found and we were looking in e_3003, try e_3001
+                if fan_mode_value is None and entity_name == "e_3003":
+                    fan_mode_value = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_3001", fan_mode_key_name)
+                    _LOGGER.debug(f"Looking for fan mode in e_3001: {fan_mode_key_name} = {fan_mode_value}")
                 
                 # For debugging
                 _LOGGER.debug(f"Fan mode value found: {fan_mode_value}")
                 
                 # Map the value to a fan mode
                 if fan_mode_value is not None:
-                    # Try to find in the reverse map first
-                    if fan_mode_value in REVERSE_FAN_MODE_MAP:
+                    # Special handling for p_2A in e_3003 (single byte values)
+                    if fan_mode_key_name == "p_2A" and len(fan_mode_value) <= 2:
+                        try:
+                            fan_level = int(fan_mode_value, 16)
+                            _LOGGER.debug(f"Interpreting p_2A value: {fan_mode_value} as level {fan_level}")
+                            
+                            # Map the fan level to a mode based on your device's values
+                            if fan_level == 0:
+                                self._fan_mode = HAFanMode.FAN_AUTO
+                            elif fan_level == 11:
+                                self._fan_mode = HAFanMode.FAN_QUIET
+                            elif fan_level == 9:  # Your device shows 09 for p_2A
+                                self._fan_mode = HAFanMode.FAN_LEVEL5
+                            elif 3 <= fan_level <= 7:
+                                level = fan_level - 2  # Convert 3-7 to 1-5
+                                self._fan_mode = getattr(HAFanMode, f"FAN_LEVEL{level}")
+                            else:
+                                self._fan_mode = HAFanMode.FAN_AUTO
+                        except (ValueError, AttributeError) as e:
+                            _LOGGER.debug(f"Error interpreting fan level: {e}")
+                            self._fan_mode = HAFanMode.FAN_AUTO
+                    # Standard handling for e_3001 parameters (p_09, p_0A, p_28)
+                    elif fan_mode_value in REVERSE_FAN_MODE_MAP:
                         self._fan_mode = REVERSE_FAN_MODE_MAP[fan_mode_value]
                     else:
                         # Try to interpret the value directly
                         try:
                             # Convert to integer and map to a fan mode
                             fan_level = int(fan_mode_value, 16) if len(fan_mode_value) > 1 else int(fan_mode_value)
-                            if fan_level == 0:
+                            _LOGGER.debug(f"Interpreting fan value: {fan_mode_value} as level {fan_level}")
+                            
+                            if fan_level == 10:  # 0A00 -> Auto
                                 self._fan_mode = HAFanMode.FAN_AUTO
-                            elif fan_level == 11:
+                            elif fan_level == 11:  # 0B00 -> Quiet
                                 self._fan_mode = HAFanMode.FAN_QUIET
-                            elif 1 <= fan_level <= 5:
-                                self._fan_mode = getattr(HAFanMode, f"FAN_LEVEL{fan_level}")
+                            elif fan_level == 7:   # 0700 -> Level 5 (based on your device)
+                                self._fan_mode = HAFanMode.FAN_LEVEL5
+                            elif 3 <= fan_level <= 7:
+                                self._fan_mode = getattr(HAFanMode, f"FAN_LEVEL{fan_level - 2}")
                             else:
                                 self._fan_mode = HAFanMode.FAN_AUTO
-                        except (ValueError, AttributeError):
+                        except (ValueError, AttributeError) as e:
+                            _LOGGER.debug(f"Error interpreting fan level: {e}")
                             self._fan_mode = HAFanMode.FAN_AUTO
                 else:
                     self._fan_mode = HAFanMode.FAN_AUTO
