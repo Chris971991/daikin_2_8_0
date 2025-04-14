@@ -516,7 +516,27 @@ class DaikinClimate(ClimateEntity):
                             _LOGGER.debug(f"Found week power data: {item.get('pv')}")
                             return item.get('pv')
             
-            # If we couldn't find the value with direct access, log it
+            # If we couldn't find the value with direct access, try a more direct approach
+            # This is needed for parameters in e_3001 like p_09, p_05, p_06, etc.
+            if 'e_3001' in keys or 'e_3003' in keys:
+                entity_name = 'e_3001' if 'e_3001' in keys else 'e_3003'
+                param_name = keys[-1]
+                
+                _LOGGER.debug(f"Trying direct approach for {entity_name} -> {param_name}")
+                
+                for item in data.get('responses', []):
+                    if item.get('fr') == fr:
+                        pc = item.get('pc', {})
+                        for root_item in pc.get('pch', []):
+                            if root_item.get('pn') == 'e_1002':
+                                for sub_item in root_item.get('pch', []):
+                                    if sub_item.get('pn') == entity_name:
+                                        for p_item in sub_item.get('pch', []):
+                                            if p_item.get('pn') == param_name:
+                                                _LOGGER.debug(f"Found {param_name} in {entity_name}: {p_item.get('pv')}")
+                                                return p_item.get('pv')
+            
+            # If we still couldn't find the value, log it
             _LOGGER.debug(f"Could not find value for path: {fr} -> {' -> '.join(keys)}")
             return None
             
