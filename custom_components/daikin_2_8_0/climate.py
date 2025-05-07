@@ -860,9 +860,9 @@ class DaikinClimate(ClimateEntity):
                 # Handle different types of energy data
                 if energy_data is not None:
                     if isinstance(energy_data, list) and len(energy_data) > 0:
-                        self._energy_today = int(energy_data[-1])
+                        self._energy_today = int(energy_data[-1]) / 10  # Adjusted by dividing by 10
                     elif isinstance(energy_data, (int, float)):
-                        self._energy_today = int(energy_data)
+                        self._energy_today = int(energy_data) / 10  # Adjusted by dividing by 10
                     else:
                         _LOGGER.warning(f"Unexpected energy data type: {type(energy_data)}")
                         self._energy_today = 0
