@@ -537,8 +537,15 @@ class DaikinClimate(ClimateEntity):
             # Get outside temperature
             try:
                 outside_temp_hex = self.find_value_by_pn(data, "/dsiot/edge/adr_0200.dgc_status", "dgc_status", "e_1003", "e_A00D", "p_01")
-                self._outside_temperature = int(outside_temp_hex, 16) / 2 if outside_temp_hex else None
-            except Exception:
+                if outside_temp_hex:
+                    # Handle 4-character hex values (e.g., "4100") by only using first 2 chars
+                    # Some devices return longer hex strings for temperature
+                    temp_hex = outside_temp_hex[:2] if len(outside_temp_hex) > 2 else outside_temp_hex
+                    self._outside_temperature = int(temp_hex, 16) / 2
+                else:
+                    self._outside_temperature = None
+            except Exception as e:
+                _LOGGER.debug(f"Error parsing outdoor temperature: {e}")
                 self._outside_temperature = None
 
             # Get humidity
