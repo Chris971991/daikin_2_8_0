@@ -66,37 +66,41 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Daikin 2.8.0 from a config entry."""
+    from aiohttp import ClientSession
+    from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
     hass.data.setdefault(DOMAIN, {})
-    
+
     ip_address = entry.data[CONF_IP_ADDRESS]
     friendly_name = entry.data.get(CONF_FRIENDLY_NAME, f"Daikin {ip_address}")
-    
-    # Create the climate entity
+
+    # Create the climate entity with shared aiohttp session
     from .climate import DaikinClimate
-    
-    climate_entity = DaikinClimate(ip_address, friendly_name)
-    await hass.async_add_executor_job(climate_entity.update)
-    await climate_entity.initialize_unique_id(hass)
-    
-    # Create and store the coordinator
+
+    session = async_get_clientsession(hass)
+    climate_entity = DaikinClimate(ip_address, friendly_name, session)
+
+    # Combine MAC fetch and initial update into single call - PERFORMANCE OPTIMIZATION
+    await climate_entity.initialize_unique_id()
+    await climate_entity.async_update()
+
+    # Create and store the coordinator (no need for first refresh, already updated)
     coordinator = DaikinDataUpdateCoordinator(hass, climate_entity)
-    await coordinator.async_config_entry_first_refresh()
-    
+
     # Store both the climate entity and coordinator in hass.data
     hass.data[DOMAIN][ip_address] = {
         "climate": climate_entity,
         "coordinator": coordinator,
         "entry_id": entry.entry_id,
     }
-    
+
     # Set up all the platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    
+
     # Update the entry with the MAC address for true uniqueness
-    # This happens after setup so we have time to get the MAC
     if entry.unique_id != climate_entity._mac:
         hass.config_entries.async_update_entry(entry, unique_id=climate_entity._mac)
-    
+
     return True
 
 
@@ -127,7 +131,7 @@ class DaikinDataUpdateCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         """Fetch data from Daikin AC."""
         try:
-            await self.hass.async_add_executor_job(self._climate.update)
+            await self._climate.async_update()
             return {
                 "current_temperature": self._climate.current_temperature,
                 "outside_temperature": self._climate._outside_temperature,

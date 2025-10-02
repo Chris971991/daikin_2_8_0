@@ -1,6 +1,6 @@
 """Daikin 2.8.0 Climate integration for Home Assistant with Smart Temperature Clipping."""
 import logging
-import requests
+import aiohttp
 from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature
 from homeassistant.components.climate.const import (
     HVACMode,
@@ -175,12 +175,13 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
 class DaikinClimate(ClimateEntity):
     """Representation of a Daikin climate device."""
 
-    def __init__(self, ip_address: str, friendly_name: str):
+    def __init__(self, ip_address: str, friendly_name: str, session: aiohttp.ClientSession):
         """Initialize the climate entity."""
         self._ip_address = ip_address
         self._friendly_name = friendly_name
         self._name = f"{friendly_name} Climate"
         self.url = f"http://{ip_address}/dsiot/multireq"
+        self._session = session
         self._hvac_mode = HVACMode.OFF
         self._fan_mode = HAFanMode.FAN_QUIET
         self._swing_mode = SWING_OFF
@@ -216,7 +217,7 @@ class DaikinClimate(ClimateEntity):
         self._attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.TURN_ON | ClimateEntityFeature.FAN_MODE | ClimateEntityFeature.SWING_MODE
         self._enable_turn_on_off_backwards_compatibility = False
 
-    async def initialize_unique_id(self, hass):
+    async def initialize_unique_id(self):
         """Get the MAC address to use as the unique ID."""
         payload = {
             "requests": [
@@ -224,16 +225,16 @@ class DaikinClimate(ClimateEntity):
             ]
         }
         try:
-            response = await hass.async_add_executor_job(lambda: requests.post(self.url, json=payload))
-            response.raise_for_status()
-            data = response.json()
-            mac_value = self.find_value_by_pn(data, "/dsiot/edge.adp_i", "adp_i", "mac")
-            if mac_value is not None:
-                self._mac = format_mac(mac_value)
-                _LOGGER.info(f"Initialized Daikin AC with MAC: {self._mac}")
-            else:
-                self._mac = f"daikin_{self._ip_address.replace('.', '_')}"
-                _LOGGER.warning(f"Could not get MAC address, using fallback ID: {self._mac}")
+            async with self._session.post(self.url, json=payload) as response:
+                response.raise_for_status()
+                data = await response.json()
+                mac_value = self.find_value_by_pn(data, "/dsiot/edge.adp_i", "adp_i", "mac")
+                if mac_value is not None:
+                    self._mac = format_mac(mac_value)
+                    _LOGGER.info(f"Initialized Daikin AC with MAC: {self._mac}")
+                else:
+                    self._mac = f"daikin_{self._ip_address.replace('.', '_')}"
+                    _LOGGER.warning(f"Could not get MAC address, using fallback ID: {self._mac}")
         except Exception as e:
             self._mac = f"daikin_{self._ip_address.replace('.', '_')}"
             _LOGGER.error(f"Error getting MAC address: {e}. Using fallback ID: {self._mac}")
@@ -355,7 +356,7 @@ class DaikinClimate(ClimateEntity):
                 fr = resp.get('fr', 'unknown')
                 raise Exception(f"Device error for {fr}: code {rsc}")
 
-    def _try_set_temperature(self, temperature: float) -> bool:
+    async def _try_set_temperature(self, temperature: float) -> bool:
         """Try to set a specific temperature. Returns True if successful."""
         attr_name = HVAC_TO_TEMP_HEX.get(self.hvac_mode)
         if attr_name is None:
@@ -374,10 +375,11 @@ class DaikinClimate(ClimateEntity):
 
         try:
             # Send the request to the device
-            response = requests.put(self.url, json=request).json()
-            _LOGGER.debug(f"Temperature response: {response}")
-            self._validate_response(response)
-            return True
+            async with self._session.put(self.url, json=request) as response:
+                data = await response.json()
+                _LOGGER.debug(f"Temperature response: {data}")
+                self._validate_response(data)
+                return True
         except Exception as e:
             if "error code: 4000" in str(e):
                 _LOGGER.debug(f"Temperature {temperature} rejected by device")
@@ -386,26 +388,40 @@ class DaikinClimate(ClimateEntity):
                 # Re-raise non-temperature-range errors
                 raise
 
-    def _search_valid_temperature(self, start_temp: float, direction: int) -> Optional[float]:
-        """Search for a valid temperature in the given direction."""
+    async def _search_valid_temperature(self, start_temp: float, direction: int) -> Optional[float]:
+        """Search for a valid temperature in the given direction using optimized search."""
         # Reasonable temperature bounds (most AC units support 16-30°C)
         min_temp, max_temp = 16.0, 30.0
-        current_temp = start_temp
 
-        # Try up to 15 temperature steps (should cover most ranges)
-        for _ in range(15):
-            current_temp += direction * 0.5  # Try half-degree increments
+        # First, try just a few nearby temperatures (most likely to succeed)
+        # This handles the common case where device rounds to nearest 0.5 or 1.0
+        quick_tries = [0.5, 1.0, -0.5, -1.0] if direction > 0 else [-0.5, -1.0, 0.5, 1.0]
+
+        for offset in quick_tries:
+            test_temp = start_temp + offset
+            if min_temp <= test_temp <= max_temp:
+                if await self._try_set_temperature(test_temp):
+                    return test_temp
+
+        # If quick tries failed, do a linear search in the specified direction
+        current_temp = start_temp
+        for _ in range(10):  # Reduced from 15 for faster failure
+            current_temp += direction * 0.5
 
             if current_temp < min_temp or current_temp > max_temp:
                 break
 
-            if self._try_set_temperature(current_temp):
+            if await self._try_set_temperature(current_temp):
                 return current_temp
 
         return None
 
-    def set_temperature(self, temperature: float, **kwargs):
+    async def async_set_temperature(self, **kwargs):
         """Set temperature with smart clipping to nearest valid value."""
+        temperature = kwargs.get("temperature")
+        if temperature is None:
+            return
+
         requested_temp = temperature
 
         _LOGGER.info("Temp change to " + str(temperature) + " requested.")
@@ -415,22 +431,22 @@ class DaikinClimate(ClimateEntity):
             return
 
         # Try the exact temperature first
-        if self._try_set_temperature(temperature):
+        if await self._try_set_temperature(temperature):
             # Success! Update the target temperature property
             self._target_temperature = temperature
             self._last_temp_adjustment = None
-            self.update()
+            # Don't call update here - let coordinator handle it
             return
 
         _LOGGER.info(f"Temperature {temperature} was rejected, trying smart clipping...")
 
         # If exact temp failed, try clipping upward first (toward warmer temps)
         # This handles the common case where requested temp is too cold
-        final_temp = self._search_valid_temperature(temperature, direction=1)
+        final_temp = await self._search_valid_temperature(temperature, direction=1)
 
         if final_temp is None:
             # If that fails, try downward (toward cooler temps)
-            final_temp = self._search_valid_temperature(temperature, direction=-1)
+            final_temp = await self._search_valid_temperature(temperature, direction=-1)
 
         if final_temp is not None:
             # Success! Record the adjustment
@@ -443,31 +459,32 @@ class DaikinClimate(ClimateEntity):
 
             # Update the target temperature property
             self._target_temperature = final_temp
-            self.update()
+            # Don't call update here - let coordinator handle it
         else:
             # No valid temperature found
             error_msg = f"No valid temperature found near {requested_temp:.1f}°C. Device may have limited temperature range in {self.hvac_mode} mode."
             _LOGGER.error(error_msg)
             raise Exception(error_msg)
 
-    def update_attribute(self, request: dict, *keys) -> None:
+    async def _update_attribute(self, request: dict) -> None:
         _LOGGER.info(request)
-        response = requests.put(self.url, json=request).json()
-        _LOGGER.info(response)
-        self._validate_response(response)
-        self.update()
+        async with self._session.put(self.url, json=request) as response:
+            data = await response.json()
+            _LOGGER.info(data)
+            self._validate_response(data)
+        # Don't call update here - let coordinator handle it
 
-    def _update_state(self, state: bool):
+    async def _update_state(self, state: bool):
         attribute = DaikinAttribute("p_01", "00" if not state else "01", ["e_1002", "e_A002"], "/dsiot/edge/adr_0100.dgc_status")
-        self.update_attribute(DaikinRequest([attribute]).serialize())
+        await self._update_attribute(DaikinRequest([attribute]).serialize())
 
-    def turn_off(self):
+    async def async_turn_off(self):
         _LOGGER.info("Turned off")
-        self._update_state(False)
+        await self._update_state(False)
 
-    def turn_on(self):
+    async def async_turn_on(self):
         _LOGGER.info("Turned on")
-        self._update_state(True)
+        await self._update_state(True)
 
     def get_swing_state(self, data: dict) -> str:
         # Get the swing attribute names for the current HVAC mode
@@ -490,7 +507,7 @@ class DaikinClimate(ClimateEntity):
             # If we can't find swing values, default to OFF
             return SWING_OFF
 
-    def update(self):
+    async def async_update(self):
         payload = {
             "requests": [
                 {"op": 2, "to": "/dsiot/edge/adr_0100.dgc_status?filter=pv,pt,md"},
@@ -500,10 +517,9 @@ class DaikinClimate(ClimateEntity):
             ]
         }
         try:
-            response = requests.post(self.url, json=payload)
-            response.raise_for_status()
-
-            data = response.json()
+            async with self._session.post(self.url, json=payload) as response:
+                response.raise_for_status()
+                data = await response.json()
 
             # Check if device is powered off
             power_status = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.dgc_status", "dgc_status", "e_1002", "e_A002", "p_01")
@@ -636,22 +652,22 @@ class DaikinClimate(ClimateEntity):
             _LOGGER.debug(f"Error finding value by pn: {e}")
             return None
 
-    def set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         _LOGGER.info("Mode change to " + str(hvac_mode) + " requested.")
         if hvac_mode == HVACMode.OFF:
-            self.turn_off()
+            await self.async_turn_off()
         else:
             # First turn on the device
-            self.turn_on()
+            await self.async_turn_on()
 
             # Then set the mode
             mode_hex = REVERSE_MODE_MAP.get(hvac_mode)
             if mode_hex:
                 mode_attr = DaikinAttribute("p_01", mode_hex, ["e_1002", "e_3001"], "/dsiot/edge/adr_0100.dgc_status")
                 request = DaikinRequest([mode_attr]).serialize()
-                self.update_attribute(request)
+                await self._update_attribute(request)
 
-    def set_fan_mode(self, fan_mode: str) -> None:
+    async def async_set_fan_mode(self, fan_mode: str) -> None:
         _LOGGER.info("Fan mode change to " + str(fan_mode) + " requested.")
         if self._hvac_mode not in HVAC_MODE_TO_FAN_SPEED_ATTR_NAME:
             _LOGGER.error(f"Cannot set fan mode in {self._hvac_mode} mode.")
@@ -673,9 +689,9 @@ class DaikinClimate(ClimateEntity):
 
         if fan_mode_hex:
             request = DaikinRequest([fan_attr]).serialize()
-            self.update_attribute(request)
+            await self._update_attribute(request)
 
-    def set_swing_mode(self, swing_mode: str) -> None:
+    async def async_set_swing_mode(self, swing_mode: str) -> None:
         _LOGGER.info("Swing mode change to " + str(swing_mode) + " requested.")
 
         # Get the swing attribute names for the current HVAC mode
@@ -707,4 +723,4 @@ class DaikinClimate(ClimateEntity):
         attributes.append(horizontal_attr)
 
         request = DaikinRequest(attributes).serialize()
-        self.update_attribute(request)
+        await self._update_attribute(request)

@@ -6,9 +6,10 @@ import ipaddress
 from typing import Any
 
 import voluptuous as vol
-import requests
+from aiohttp import ClientError
 
 from homeassistant import config_entries
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.const import CONF_IP_ADDRESS, CONF_FRIENDLY_NAME
 from homeassistant.data_entry_flow import FlowResult
 import homeassistant.helpers.config_validation as cv
@@ -75,13 +76,12 @@ class DaikinFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 {"op": 2, "to": "/dsiot/edge.adp_i"}
             ]
         }
-        
+
+        session = async_get_clientsession(self.hass)
         try:
-            response = await self.hass.async_add_executor_job(
-                lambda: requests.post(url, json=payload, timeout=10)
-            )
-            response.raise_for_status()
-            return True
-        except requests.RequestException as err:
+            async with session.post(url, json=payload, timeout=10) as response:
+                response.raise_for_status()
+                return True
+        except ClientError as err:
             _LOGGER.error("Error connecting to Daikin AC: %s", err)
             raise ConnectionError from err
