@@ -601,7 +601,7 @@ class DaikinClimate(ClimateEntity):
                 self._runtime_today = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.i_power.week_power", "week_power", "today_runtime")
                 energy_data = self.find_value_by_pn(data, "/dsiot/edge/adr_0100.i_power.week_power", "week_power", "datas")
                 if isinstance(energy_data, list) and len(energy_data) > 0:
-                    self._energy_today = energy_data[0] / 100  # Convert to kWh
+                    self._energy_today = energy_data[0] / 1000  # Convert to kWh
             except Exception:
                 pass
 
